@@ -1,5 +1,6 @@
 # Core
 PyYAML>=6.0
+publicsuffixlist>=1.0  # bundled Public Suffix List (offline) for enumeration seeds
 
 # API + GUI (used from build-order step 6 onward)
 fastapi>=0.110

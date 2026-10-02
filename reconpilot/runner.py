@@ -34,6 +34,7 @@ from .config import Scope, ToolSpec
 from .errors import RunnerError
 from .rate_limiter import RateLimiter
 from .scope_guard import ScopeDecision, ScopeGuard
+from .seeds import check_seed
 from .tool_detect import detect_tool, require_tool
 
 # A tool's args reference its batch input file by one of these names; they all
@@ -162,7 +163,17 @@ class GuardedRunner:
     # -- public API ---------------------------------------------------------- #
     def run(self, tool: str, targets: list[str], output_dir: str | Path, *,
             wordlist: Optional[str] = None, templates: Optional[str] = None,
-            dry_run: bool = False, timeout_s: Optional[int] = None) -> RunResult:
+            dry_run: bool = False, timeout_s: Optional[int] = None,
+            seeds: bool = False) -> RunResult:
+        """Run ``tool`` against ``targets``.
+
+        ``seeds=True`` treats ``targets`` as passive enumeration seeds (search
+        keys, not hosts the tool touches): they pass the seed gate
+        (:func:`reconpilot.seeds.check_seed`) instead of the target gate, and
+        are audited as ``seed_decision``. Only PASSIVE tools may run in seed
+        mode; an active tool is refused. Discovered hosts must still be
+        scope-filtered by the caller.
+        """
         spec = self.registry.get(tool)
         if spec is None:
             # require_tool raises with the right message; surfaces not_in_registry too
@@ -191,12 +202,27 @@ class GuardedRunner:
             return result
 
         # 2. scope gate — every target decided + audited by the guard
-        allowed_dec, rejected_dec = self.guard.filter(targets)
+        #    (or, for passive seed mode, the seed gate — audited separately)
+        if seeds:
+            if spec.active:
+                reason = (f"refusing seed mode for active tool '{tool}': seeds bypass "
+                          "the target gate, so only passive tools may use them")
+                self.audit.log_event("tool_refused", tool=tool, reason=reason)
+                raise RunnerError(reason)
+            allowed_dec, rejected_dec = [], []
+            for t in targets:
+                d = check_seed(self.scope, t)
+                self.audit.log_event("seed_decision", tool=tool, seed=d.target,
+                                     host=d.host, allowed=d.allowed, reason=d.reason,
+                                     matched_rule=d.matched_rule)
+                (allowed_dec if d.allowed else rejected_dec).append(d)
+        else:
+            allowed_dec, rejected_dec = self.guard.filter(targets)
         result.allowed = [d.target for d in allowed_dec]
         result.rejected = [d.target for d in rejected_dec]
 
         if mode in ("per_target", "batch") and not allowed_dec:
-            result.skipped_reason = "no in-scope targets"
+            result.skipped_reason = "no valid seeds" if seeds else "no in-scope targets"
             self.audit.log_event("tool_skipped", tool=tool, reason=result.skipped_reason,
                                  rejected=len(rejected_dec))
             return result

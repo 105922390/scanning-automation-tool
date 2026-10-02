@@ -4,9 +4,11 @@ Genuinely passive: it runs only tools marked ``active: false`` whose output is
 ``subdomains`` (subfinder, amass passive). It never sends traffic to the target.
 
 Flow:
-  1. derive enumeration roots (registrable domains) from the engagement in_scope
-  2. run each passive tool on the roots via the guarded runner (which scope-gates
-     and audits the SEEDS, and rate/allowlist-checks the tool)
+  1. derive enumeration roots (public-suffix-aware registrable domains) from the
+     engagement in_scope — a ``*.X`` wildcard contributes X as a SEED even when
+     apex X is not itself an in-scope target (see ``reconpilot.seeds``)
+  2. run each passive tool on the roots via the guarded runner in seed mode
+     (seed gate + ``seed_decision`` audit, allowlist/rate checks on the tool)
   3. scope-filter EVERY returned hostname through ScopeGuard — out-of-scope hosts
      (aws.*, test.*, *.dev, subsidiaries) are dropped and each rejection audited
   4. upsert allowed hosts into the assets table (dedup, first/last seen, source)
@@ -24,6 +26,7 @@ from typing import Iterable, Optional
 from ..audit_log import AuditLog
 from ..config import Scope, ToolSpec
 from ..scope_guard import ScopeGuard
+from ..seeds import declared_seed_rule, enumeration_seeds
 from ..store import Store
 
 # First token on a line that plausibly looks like a hostname. We stay lenient and
@@ -56,8 +59,8 @@ def parse_hosts(path: str | Path) -> list[str]:
 class PassiveReconResult:
     run_id: int
     roots: list[str]
-    roots_enumerated: list[str]              # seeds the runner accepted (in scope)
-    roots_dropped: list[str]                 # seeds the runner rejected (out of scope)
+    roots_enumerated: list[str]              # seeds the runner accepted (seed gate)
+    roots_dropped: list[str]                 # seeds the runner rejected (seed gate)
     total_found: int                         # unique hostnames returned by tools
     in_scope_kept: int
     out_of_scope_dropped: int
@@ -69,8 +72,8 @@ class PassiveReconResult:
 
     def summary_text(self) -> str:
         if self.dry_run:
-            lines = [f"[passive_recon] DRY RUN — {len(self.roots_enumerated)} in-scope "
-                     f"roots, {len(self.roots_dropped)} out-of-scope seed(s) dropped"]
+            lines = [f"[passive_recon] DRY RUN — {len(self.roots_enumerated)} seed(s), "
+                     f"{len(self.roots_dropped)} invalid seed(s) dropped"]
             if self.roots_dropped:
                 lines.append(f"  dropped seeds : {', '.join(self.roots_dropped)}")
             lines += [f"  $ {c}" for c in self.planned_commands]
@@ -78,7 +81,7 @@ class PassiveReconResult:
         lines = [
             f"[passive_recon] run #{self.run_id}",
             f"  roots enumerated : {len(self.roots_enumerated)}"
-            f" ({len(self.roots_dropped)} out-of-scope seed(s) dropped)",
+            f" ({len(self.roots_dropped)} invalid seed(s) dropped)",
             f"  total found      : {self.total_found}",
             f"  in-scope kept    : {self.in_scope_kept}",
             f"  out-of-scope drop: {self.out_of_scope_dropped}",
@@ -118,15 +121,23 @@ class PassiveReconStage:
 
     # -- enumeration roots --------------------------------------------------- #
     def enumeration_roots(self) -> list[str]:
-        """Registrable domains to enumerate: wildcard bases + plain in_scope
-        entries, deduped. Wildcards themselves are never enumerated as literals."""
-        roots: set[str] = set()
-        for d in self.scope.in_scope_domains:
-            d = d.strip().lower().rstrip(".")
-            if not d:
+        """Seeds to enumerate: exactly X for every ``*.X`` entry, plus plain
+        entries not already under another seed. These are passive search keys,
+        not targets — ``*.amazonalexa.com`` yields ``amazonalexa.com`` although
+        the apex is not in scope. Wildcards are never enumerated as literals.
+
+        Safety net: a seed that is not declared by an in_scope entry (a plain
+        entry or a ``*.X`` base) is a derivation error — audited and dropped,
+        never enumerated."""
+        roots = []
+        for seed in enumeration_seeds(self.scope):
+            if declared_seed_rule(self.scope, seed) is None:
+                self.audit.log_event(
+                    "seed_derivation_error", seed=seed,
+                    reason="derived seed is not an in_scope entry or *.X base; dropped")
                 continue
-            roots.add(d[2:] if d.startswith("*.") else d)
-        return sorted(r for r in roots if r)
+            roots.append(seed)
+        return roots
 
     # -- ingest (scope-filter + store) --------------------------------------- #
     def ingest(self, discovered: Iterable[tuple[str, str]], run_id: int
@@ -165,7 +176,7 @@ class PassiveReconStage:
         run_id = 0 if dry_run else self.store.start_run(self.STAGE, tool=",".join(self.tools))
         try:
             for tool in self.tools:
-                res = self.runner.run(tool, roots, base / tool, dry_run=dry_run)
+                res = self.runner.run(tool, roots, base / tool, dry_run=dry_run, seeds=True)
                 roots_enum.update(res.allowed)
                 roots_dropped.update(res.rejected)
                 if dry_run:

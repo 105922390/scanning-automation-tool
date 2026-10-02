@@ -328,3 +328,39 @@ def test_oob_flag_absent_when_policy_off(scope, tmp_path):
     runner, _ = _mk(scope, tmp_path, user_agent="UA-X", no_third_party_oob=False)
     res = runner.run("act_oob", ["foo.acme.com"], tmp_path / "o", dry_run=True)
     assert "-no-interactsh" not in res.invocations[0].command
+
+
+# --------------------------------------------------------------------------- #
+# passive seed mode (wildcard-seed fix)
+# --------------------------------------------------------------------------- #
+def test_seed_mode_accepts_wildcard_base_and_audits_seed_decision(
+        fake_scope, registry_fake, fake_tools, tmp_path):
+    _, which = fake_tools
+    reg = dict(registry_fake, echotool=dataclasses.replace(
+        registry_fake["echotool"], active=False))
+    runner, audit = _runner(fake_scope, reg, which, tmp_path)
+    # acme-api.com is only covered by *.acme-api.com -> not a target, but a seed
+    res = runner.run("echotool", ["acme-api.com", "evil.com", "com"],
+                     tmp_path / "out", seeds=True)
+    assert res.allowed == ["acme-api.com"]
+    assert sorted(res.rejected) == ["com", "evil.com"]
+    assert res.invocations[0].exit_code == 0
+    recs = audit.read_all()
+    seeds = {r["seed"]: r["allowed"] for r in recs if r["event"] == "seed_decision"}
+    assert seeds == {"acme-api.com": True, "evil.com": False, "com": False}
+    # seeds are NOT run through the target gate
+    assert not any(r["event"] == "scope_decision" for r in recs)
+
+
+def test_seed_mode_refused_for_active_tool(fake_scope, registry_fake, fake_tools, tmp_path):
+    _, which = fake_tools
+    runner, audit = _runner(fake_scope, registry_fake, which, tmp_path)  # echotool active
+    with pytest.raises(RunnerError):
+        runner.run("echotool", ["acme-api.com"], tmp_path / "out", seeds=True)
+    assert any(r["event"] == "tool_refused" for r in audit.read_all())
+
+
+def test_target_mode_still_rejects_wildcard_base(fake_scope, registry_fake, tmp_path):
+    runner, _ = _runner(fake_scope, registry_fake, lambda n: None, tmp_path)
+    res = runner.run("echotool", ["acme-api.com"], tmp_path / "o", dry_run=True)
+    assert res.rejected == ["acme-api.com"] and not res.invocations

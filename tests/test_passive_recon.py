@@ -9,6 +9,7 @@ from reconpilot.audit_log import AuditLog
 from reconpilot.config import load_tools
 from reconpilot.engagement import load_engagement
 from reconpilot.scope_guard import ScopeGuard
+from reconpilot.seeds import check_seed
 from reconpilot.stages import PassiveReconStage, parse_hosts
 from reconpilot.store import Store
 
@@ -28,15 +29,20 @@ def registry():
 
 
 class FakeRunner:
-    """Stands in for GuardedRunner: scope-gates seeds (like the real one) and
-    writes canned tool output. No subprocess, no network."""
+    """Stands in for GuardedRunner: gates seeds/targets with the same functions
+    the real one uses and writes canned tool output. No subprocess, no network."""
     def __init__(self, scope, outputs: dict[str, list[str]]):
+        self.scope = scope
         self.guard = ScopeGuard(scope)
         self.outputs = outputs
+        self.calls = []
 
-    def run(self, tool, targets, output_dir, *, dry_run=False, **kw):
-        allowed = [t for t in targets if self.guard.is_allowed(t)]
-        rejected = [t for t in targets if not self.guard.is_allowed(t)]
+    def run(self, tool, targets, output_dir, *, dry_run=False, seeds=False, **kw):
+        self.calls.append((tool, list(targets), seeds))
+        ok = ((lambda t: check_seed(self.scope, t).allowed) if seeds
+              else self.guard.is_allowed)
+        allowed = [t for t in targets if ok(t)]
+        rejected = [t for t in targets if not ok(t)]
         invs = []
         if not dry_run:
             d = Path(output_dir)
@@ -65,9 +71,24 @@ def test_enumeration_roots(amazon, registry, tmp_path):
     stage, *_ = _stage(amazon, registry, tmp_path, {})
     roots = stage.enumeration_roots()
     assert "amazon.com" in roots and "amazon.co.uk" in roots
-    assert "amazonalexa.com" in roots              # wildcard base
-    assert "api.amazonalexa.com" in roots          # plain host entry
+    assert "amazon.com.au" in roots                # multi-part public suffix kept whole
+    assert "amazonalexa.com" in roots              # wildcard base -> seed
+    # plain host entry collapses onto its registrable domain (no separate root)
+    assert "api.amazonalexa.com" not in roots
     assert not any(r.startswith("*.") for r in roots)   # no wildcards
+    assert len(roots) == len(set(roots))
+    # regression: com.be is not in the PSL; the root must not collapse to it
+    assert "amazon.com.be" in roots and "com.be" not in roots
+    assert len(roots) == 27                        # 26 marketplaces + amazonalexa.com
+
+
+def test_underived_seed_is_dropped_and_audited(amazon, registry, tmp_path, monkeypatch):
+    import reconpilot.stages.passive_recon as pr
+    monkeypatch.setattr(pr, "enumeration_seeds", lambda scope: ["amazon.com", "com.be"])
+    stage, _, audit = _stage(amazon, registry, tmp_path, {})
+    assert stage.enumeration_roots() == ["amazon.com"]
+    errs = [r for r in audit.read_all() if r["event"] == "seed_derivation_error"]
+    assert [e["seed"] for e in errs] == ["com.be"]
 
 
 def test_only_passive_subdomain_tools_selected(amazon, registry, tmp_path):
@@ -146,14 +167,39 @@ def test_diff_reports_only_new_on_second_run(amazon, registry, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# out-of-scope SEED dropped (amazonalexa.com apex not in scope)
+# wildcard-only root is a SEED (amazonalexa.com apex is not a target)
 # --------------------------------------------------------------------------- #
-def test_out_of_scope_seed_is_dropped(amazon, registry, tmp_path):
-    stage, *_ = _stage(amazon, registry, tmp_path, {"subfinder": [], "amass": []})
+def test_wildcard_only_root_is_enumerated(amazon, registry, tmp_path):
+    stage, _, _ = _stage(amazon, registry, tmp_path, {"subfinder": [], "amass": []})
+    # precondition: the apex really is NOT an in-scope target
+    assert not ScopeGuard(amazon).is_allowed("amazonalexa.com")
     res = stage.run()
-    # the wildcard-derived apex amazonalexa.com has no in-scope apex entry -> dropped
-    assert "amazonalexa.com" in res.roots_dropped
+    assert "amazonalexa.com" in res.roots_enumerated
     assert "amazon.com" in res.roots_enumerated
+    assert res.roots_dropped == []
+    # every passive tool was invoked in seed mode with the wildcard base
+    assert all(seeds and "amazonalexa.com" in t for _, t, seeds in stage.runner.calls)
+
+
+def test_discovered_hosts_under_seed_still_scope_filtered(amazon, registry, tmp_path):
+    outputs = {"subfinder": [
+        "amazonalexa.com",               # drop: apex is not an in-scope target
+        "skills.amazonalexa.com",        # keep: *.amazonalexa.com
+        "aws.amazonalexa.com",           # drop: label_contains:aws
+        "beta.api.amazonalexa.com",      # drop: label_equals:beta
+        "alexa.example.net",             # drop: unrelated host a dataset returned
+    ], "amass": []}
+    stage, store, audit = _stage(amazon, registry, tmp_path, outputs)
+    res = stage.run()
+    kept = {a["key"] for a in store.list_assets(kind="subdomain")}
+    assert kept == {"skills.amazonalexa.com"}
+    assert res.out_of_scope_dropped == 4
+    rejects = {r["host"]: r for r in audit.read_all()
+               if r.get("event") == "scope_decision" and not r.get("allowed")}
+    assert rejects["amazonalexa.com"]["reason"] == "not in scope"
+    assert rejects["aws.amazonalexa.com"]["matched_rule"] == "label_contains:aws"
+    assert rejects["beta.api.amazonalexa.com"]["matched_rule"] == "label_equals:beta"
+    assert "alexa.example.net" in rejects
 
 
 def test_dry_run_plans_without_storing(amazon, registry, tmp_path):
@@ -161,4 +207,5 @@ def test_dry_run_plans_without_storing(amazon, registry, tmp_path):
     res = stage.run(dry_run=True)
     assert res.dry_run and res.planned_commands
     assert store.counts()["assets"] == {}        # nothing written
-    assert "amazonalexa.com" in res.roots_dropped
+    assert "amazonalexa.com" in res.roots_enumerated
+    assert any(c.endswith("amazonalexa.com") for c in res.planned_commands)
