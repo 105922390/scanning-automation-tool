@@ -3,6 +3,7 @@
 import dataclasses
 import os
 import stat
+import sys
 
 import pytest
 
@@ -69,22 +70,39 @@ def fake_tools(tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir()
 
-    echo = bindir / "echotool"
-    echo.write_text("#!/usr/bin/env python3\nimport sys\nprint(sys.argv[1])\n")
-    filet = bindir / "filetool"
-    filet.write_text(
-        "#!/usr/bin/env python3\n"
-        "import sys\n"
-        "a = sys.argv[1:]\n"
-        "inp = a[a.index('-l')+1]; out = a[a.index('-o')+1]\n"
-        "n = sum(1 for _ in open(inp))\n"
-        "open(out,'w').write(f'lines={n}\\n')\n"
-        "print('scanned', n)\n")
-    for f in (echo, filet):
-        f.chmod(f.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-
-    paths = {"echotool": str(echo), "filetool": str(filet)}
+    bodies = {
+        "echotool": "import sys\nprint(sys.argv[1])\n",
+        "filetool": (
+            "import sys\n"
+            "a = sys.argv[1:]\n"
+            "inp = a[a.index('-l')+1]; out = a[a.index('-o')+1]\n"
+            "n = sum(1 for _ in open(inp))\n"
+            "open(out,'w').write(f'lines={n}\\n')\n"
+            "print('scanned', n)\n"),
+    }
+    paths = {name: str(_make_stub(bindir, name, body)) for name, body in bodies.items()}
     return paths, (lambda name: paths.get(name))
+
+
+def _make_stub(bindir, name, body):
+    """Write a fake tool the runner can exec directly on the current OS.
+
+    The logic lives in ``<name>.py``; the returned launcher runs it with the
+    interpreter executing the tests (sys.executable), so no python3 on PATH is
+    needed. Windows can't exec shebang scripts, so it gets a ``.cmd`` wrapper.
+    """
+    script = bindir / f"{name}.py"
+    script.write_text(body)
+    if os.name == "nt":
+        launcher = bindir / f"{name}.cmd"
+        launcher.write_text(f'@"{sys.executable}" "{script}" %*\r\n')
+        return launcher
+    launcher = bindir / name
+    # shebangs can't contain spaces; fall back to env lookup in that case
+    interp = sys.executable if " " not in sys.executable else "/usr/bin/env python3"
+    launcher.write_text(f"#!{interp}\n" + body)
+    launcher.chmod(launcher.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return launcher
 
 
 @pytest.fixture
