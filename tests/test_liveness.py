@@ -258,3 +258,19 @@ def test_timeout_ingests_partial_output_from_sidecar(live_scope, registry, tmp_p
     assert res.live == 1
     assert store.keys_where_flag("subdomain", "live", True) == ["www.acme.com"]
     assert store.get_run(res.run_id).status == "completed"
+
+
+# --------------------------------------------------------------------------- #
+# --host override: probe one explicit host, bypassing DB selection
+# --------------------------------------------------------------------------- #
+def test_run_with_explicit_host_bypasses_db_selection(live_scope, registry, tmp_path):
+    store = Store(":memory:")                       # no resolved hosts in the DB at all
+    audit = AuditLog(tmp_path / "audit.jsonl", engagement="t")
+    runner = _FakeHttpxRunner([
+        {"input": "www.acme.com", "url": "https://www.acme.com/", "status_code": 200}])
+    stage = LivenessStage(live_scope, registry, store, audit, runner, tmp_path / "out")
+    assert stage.hosts_to_probe() == []            # nothing resolved -> normal run = 0
+    res = stage.run(hosts=["www.acme.com"])        # explicit host override
+    assert runner.calls == [("httpx", ["www.acme.com"])]   # went through invoke_tool->runner
+    assert res.live == 1
+    assert store.keys_where_flag("subdomain", "live", True) == ["www.acme.com"]

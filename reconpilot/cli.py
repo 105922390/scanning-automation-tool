@@ -45,6 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit-hosts", type=int, metavar="N",
                    help="with --run-dns/--run-liveness: cap the input to the first N hosts "
                         "(use --limit-hosts 1 for a single-host first live run)")
+    p.add_argument("--host", metavar="HOSTNAME",
+                   help="with --run-liveness: probe exactly this one host (bypasses DB "
+                        "selection); still scope-gated and run through the guarded runner")
     p.add_argument("--tools", default="tools.yaml", metavar="FILE",
                    help="tool registry file (default: tools.yaml)")
     p.add_argument("--out", metavar="DIR",
@@ -144,13 +147,29 @@ def _run_active_stage(scope, args, *, stage_cls, stage_name: str) -> int:
         return 2
 
     limit = args.limit_hosts
-    n_in = len(stage.hosts_to_resolve(limit=limit) if stage_name == "dns_resolve"
-               else stage.hosts_to_probe(limit=limit))
-    cap = f" (limit {limit})" if limit else ""
+    # --host (liveness only): probe exactly one host, bypassing DB selection. Still
+    # scope-gated here for a clean message (and again by the runner), and run
+    # through the same GuardedRunner path (UA / rate / redirect filter).
+    single = getattr(args, "host", None) if stage_name == "liveness" else None
+    run_kwargs = {"dry_run": args.dry_run, "limit": limit}
+    if single:
+        from .scope_guard import ScopeGuard
+        dec = ScopeGuard(scope).check(single)
+        if not dec.allowed:
+            store.close()
+            print(f"error: host {single!r} is out of scope: {dec.reason}", file=sys.stderr)
+            return 2
+        run_kwargs["hosts"] = [single]
+        n_in = 1
+        cap = f" [--host {dec.host}]"
+    else:
+        n_in = len(stage.hosts_to_resolve(limit=limit) if stage_name == "dns_resolve"
+                   else stage.hosts_to_probe(limit=limit))
+        cap = f" (limit {limit})" if limit else ""
     print(f"\nRunning {stage_name} ({stage.TOOL}) on {n_in} host(s){cap}"
           f"{' [DRY RUN]' if args.dry_run else ''} ...\n")
     try:
-        result = stage.run(dry_run=args.dry_run, limit=limit)
+        result = stage.run(**run_kwargs)
     except NotImplementedError:
         store.close()
         print(f"error: {stage_name} execution is not wired yet — "

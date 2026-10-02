@@ -231,3 +231,21 @@ def test_cli_run_liveness_errors_cleanly_when_httpx_absent(capsys, tmp_path, ama
     assert rc == 1
     err = capsys.readouterr().err
     assert "httpx" in err and "tools.yaml" in err
+
+
+def test_cli_run_liveness_host_rejects_out_of_scope(capsys, tmp_path, amazon_copy):
+    # --host out of scope: rejected up front (rc 2), never runs the tool
+    rc = cli.main(["-e", "amazon-vrp", "--engagements-dir", str(amazon_copy),
+                   "--run-liveness", "--host", "www.google.com", "--out", str(tmp_path / "r")])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "out of scope" in err and "google.com" in err
+
+
+def test_cli_run_liveness_host_in_scope_dry_run(capsys, tmp_path, amazon_copy):
+    # in-scope --host on a dry run: planned, reported as 1 host, no execution
+    rc = cli.main(["-e", "amazon-vrp", "--engagements-dir", str(amazon_copy),
+                   "--run-liveness", "--host", "www.amazon.com", "--dry-run",
+                   "--out", str(tmp_path / "r")])
+    out = capsys.readouterr().out
+    assert rc == 0 and "on 1 host(s)" in out and "--host www.amazon.com" in out

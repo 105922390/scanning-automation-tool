@@ -214,8 +214,12 @@ class LivenessStage:
     # -- orchestration ------------------------------------------------------- #
     def run(self, dry_run: bool = False,
             executor: Optional[Callable[[list[str], Path], Iterable]] = None,
-            limit: Optional[int] = None) -> LivenessResult:
-        hosts = self.hosts_to_probe(limit=limit)
+            limit: Optional[int] = None,
+            hosts: Optional[list[str]] = None) -> LivenessResult:
+        # ``hosts`` overrides DB selection (e.g. CLI --host) to probe exactly those
+        # hosts; the GuardedRunner still scope-gates every one. Otherwise probe the
+        # resolved hosts from the store.
+        hosts = list(hosts) if hosts is not None else self.hosts_to_probe(limit=limit)
         tag = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         base = self.output_dir / tag
         if dry_run:
