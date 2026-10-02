@@ -43,6 +43,7 @@ from ..config import Scope, ToolSpec
 from ..http_policy import filter_on_redirect, redirect_target_host
 from ..scope_guard import ScopeGuard, normalize_target
 from ..store import Store
+from ._ingest import choose_output
 
 # httpx JSON keys vary by version; probe a few for each field.
 _TECH_KEYS = ("tech", "technologies")
@@ -228,11 +229,14 @@ class LivenessStage:
         drop_examples: list[tuple[str, str, str]] = []
         try:
             for inv in run(hosts, base) or []:
-                ok = inv.exit_code == 0 or getattr(inv, "timed_out", False)
-                if ok and inv.output_path:
-                    probed += len(parse_httpx_jsonl(inv.output_path))
-                    l, d, ex = self.ingest_httpx_file(inv.output_path, run_id)
-                    live += l; dropped += d; drop_examples += ex
+                # ingest on clean exit AND on timeout; choose_output falls back to
+                # the stdout sidecar if a timed-out httpx never flushed its -o file
+                if inv.exit_code == 0 or getattr(inv, "timed_out", False):
+                    path = choose_output(inv, parse_httpx_jsonl)
+                    if path:
+                        probed += len(parse_httpx_jsonl(path))
+                        l, d, ex = self.ingest_httpx_file(path, run_id)
+                        live += l; dropped += d; drop_examples += ex
         except BaseException as e:  # noqa: BLE001 - Ctrl-C included: finalize first
             reason = type(e).__name__ if isinstance(e, KeyboardInterrupt) \
                 else f"{type(e).__name__}: {e}"

@@ -371,6 +371,20 @@ class GuardedRunner:
         return "single"
 
     # -- per-target ---------------------------------------------------------- #
+    # -- who counts against the per-host budget ------------------------------ #
+    @staticmethod
+    def _hits_target(spec: ToolSpec) -> bool:
+        """True if this tool sends traffic to the in-scope TARGET host, making it
+        subject to the per-host rate limiter AND the run-wide request breaker
+        (``max_requests_per_run``).
+
+        Exempt: passive tools (``active=False``) query third-party datasets, and
+        resolver tools (``resolver=True``, e.g. dnsx) query public DNS resolvers —
+        neither touches the target, so neither is paced or counted. The breaker
+        stays fully in force for active, target-hitting stages (httpx, nuclei, …).
+        """
+        return spec.active and not spec.resolver
+
     def _run_per_target(self, spec, binary, dec: ScopeDecision, out_dir, rps, conc,
                         wordlist, templates, dry_run, timeout_s, http_args) -> Invocation:
         out_path = out_dir / f"{_safe(spec.name)}-{_safe(dec.host)}-{_utc_tag()}.out"
@@ -381,8 +395,11 @@ class GuardedRunner:
                             extra_args=http_args)
         if dry_run:
             return Invocation(spec.name, dec.target, cmd, str(out_path))
-        # 3. rate limit this single request against the per-host bucket + breaker
-        self.rl.acquire(dec.host)
+        # 3. rate limit this single request against the per-host bucket + breaker,
+        #    but only for tools that actually hit the target host (not passive /
+        #    resolver tools, which go to third parties / public resolvers)
+        if self._hits_target(spec):
+            self.rl.acquire(dec.host)
         return self._exec(spec, cmd, dec.target, out_path, writes_own, timeout_s)
 
     # -- batch (file input; tool self-paces via {rps}) ----------------------- #
@@ -401,8 +418,11 @@ class GuardedRunner:
         label = f"batch:{len(allowed_dec)}"
         if dry_run:
             return Invocation(spec.name, label, cmd, str(out_path))
-        # 3. count the batch against the breaker; the tool enforces per-host rps
-        self.rl.charge(len(allowed_dec))
+        # 3. count the batch against the breaker ONLY if it hits the target host;
+        #    the tool enforces its own per-host rps via {rps}. Passive/resolver
+        #    batches (e.g. dnsx over 57k hosts) do not count against the breaker.
+        if self._hits_target(spec):
+            self.rl.charge(len(allowed_dec))
         return self._exec(spec, cmd, label, out_path, writes_own, timeout_s)
 
     def _run_single(self, spec, binary, out_dir, rps, conc, wordlist, templates,
@@ -414,7 +434,8 @@ class GuardedRunner:
                             extra_args=http_args)
         if dry_run:
             return Invocation(spec.name, "single", cmd, str(out_path))
-        self.rl.charge(1)
+        if self._hits_target(spec):
+            self.rl.charge(1)
         return self._exec(spec, cmd, "single", out_path, writes_own, timeout_s)
 
     # -- execution ----------------------------------------------------------- #

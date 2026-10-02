@@ -33,11 +33,17 @@ from typing import Callable, Iterable, Optional
 from ..audit_log import AuditLog
 from ..config import Scope, ToolSpec
 from ..store import Store
+from ._ingest import choose_output
 
 # dnsx text output (-a -resp): "host [A] [1.2.3.4]" with one [TYPE] [value] pair
 # per record; a host may appear on several lines. We also accept dnsx -json.
 _RESP_RE = re.compile(r"\[([A-Za-z]+)\]\s*\[([^\]]+)\]")
 _RECORD_FIELDS = ("a", "aaaa", "cname")
+# dnsx colorizes its -o output by default: "[\x1b[35mA\x1b[0m] [\x1b[32m1.2.3.4\x1b[0m]".
+# Those SGR escapes sit INSIDE the brackets and break the [TYPE]/[value] match, so
+# strip them (and any stray CR) before parsing. (-nc in tools.yaml avoids them going
+# forward, but existing output files and older dnsx builds still carry them.)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 @dataclass
@@ -88,7 +94,7 @@ def parse_dnsx(path: str | Path) -> list[Resolution]:
         return []
     table: dict[str, Resolution] = {}
     for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
+        line = _ANSI_RE.sub("", line).strip()   # drop color escapes + CR/whitespace
         if not line or line.startswith("#"):
             continue
         if line.startswith("{"):
@@ -196,13 +202,17 @@ class DnsResolveStage:
         ips: set[str] = set()
         try:
             for inv in run(hosts, base) or []:
-                ok = inv.exit_code == 0 or getattr(inv, "timed_out", False)
-                if ok and inv.output_path:
-                    for res in parse_dnsx(inv.output_path):
-                        self.store.upsert_asset("subdomain", res.host, run_id,
-                                                attrs=res.attrs(run_id))
-                        resolved_hosts.add(res.host)
-                        ips.update(res.ips)
+                # ingest on clean exit AND on timeout (partial output is still
+                # valuable); choose_output falls back to the stdout sidecar if a
+                # timed-out tool never flushed its own -o file
+                if inv.exit_code == 0 or getattr(inv, "timed_out", False):
+                    path = choose_output(inv, parse_dnsx)
+                    if path:
+                        for res in parse_dnsx(path):
+                            self.store.upsert_asset("subdomain", res.host, run_id,
+                                                    attrs=res.attrs(run_id))
+                            resolved_hosts.add(res.host)
+                            ips.update(res.ips)
         except BaseException as e:  # noqa: BLE001 - Ctrl-C included: finalize first
             reason = type(e).__name__ if isinstance(e, KeyboardInterrupt) \
                 else f"{type(e).__name__}: {e}"

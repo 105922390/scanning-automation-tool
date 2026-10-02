@@ -237,3 +237,24 @@ def test_default_run_path_calls_runner_via_invoke_tool(live_scope, registry, tmp
     assert runner.calls == [("httpx", ["www.acme.com"])]   # wired default path used
     assert res.live == 1 and store.get_run(res.run_id).status == "completed"
     assert store.keys_where_flag("subdomain", "live", True) == ["www.acme.com"]
+
+
+def test_timeout_ingests_partial_output_from_sidecar(live_scope, registry, tmp_path):
+    """A timed-out httpx may not flush its -o file; partial JSONL in the stdout
+    sidecar '<out>.log' must still be ingested (same fallback as dns_resolve)."""
+    stage, store, _ = _stage(live_scope, registry, tmp_path)
+    store.upsert_asset("subdomain", "www.acme.com", store.start_run("dns_resolve"),
+                       attrs={"resolves": True})
+
+    def killed(hosts, out_dir):
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        out = Path(out_dir) / "httpx.json"
+        out.write_text("")                              # -o never flushed
+        _jsonl(Path(out_dir) / "httpx.json.log", [      # captured stdout: partial
+            {"input": "www.acme.com", "url": "https://www.acme.com/", "status_code": 200}])
+        return [SimpleNamespace(output_path=str(out), exit_code=-1, timed_out=True)]
+
+    res = stage.run(executor=killed)
+    assert res.live == 1
+    assert store.keys_where_flag("subdomain", "live", True) == ["www.acme.com"]
+    assert store.get_run(res.run_id).status == "completed"

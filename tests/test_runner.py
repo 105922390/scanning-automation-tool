@@ -475,3 +475,48 @@ def test_ctrl_c_during_tool_kills_tree_logs_tool_end_and_reraises(
     assert len(killed) == 1
     ends = [r for r in audit.read_all() if r["event"] == "tool_end"]
     assert ends and ends[0]["error"] == "interrupted: KeyboardInterrupt"
+
+
+# --------------------------------------------------------------------------- #
+# circuit breaker scope: only target-hitting requests count (item fix)
+# --------------------------------------------------------------------------- #
+def test_resolver_batch_is_exempt_from_breaker(fake_scope, registry_fake, fake_tools, tmp_path):
+    """A large dns_resolve-style batch (resolver=True) must NOT trip the breaker
+    or count against max_requests_per_run — it queries resolvers, not the target."""
+    _, which = fake_tools
+    reg = dict(registry_fake, filetool=dataclasses.replace(
+        registry_fake["filetool"], resolver=True))
+    rl = RateLimiter(Limits(max_rps_per_host=100, max_global_concurrency=4,
+                            max_requests_per_run=1, safe_mode=False))   # tiny cap
+    runner, _ = _runner(fake_scope, reg, which, tmp_path, rate_limiter=rl)
+    res = runner.run("filetool", ["a.acme.com", "b.acme.com", "c.acme.com"],
+                     tmp_path / "out")                                  # 3 >> cap of 1
+    assert res.invocations[0].exit_code == 0        # ran, not blocked
+    assert rl.request_count == 0                    # nothing charged to the breaker
+
+
+def test_passive_per_target_is_exempt_from_breaker(fake_scope, registry_fake, fake_tools, tmp_path):
+    """Passive per-target tools (active=False) don't hit the target host, so they
+    neither pace against the per-host bucket nor count against the breaker."""
+    _, which = fake_tools
+    reg = dict(registry_fake, echotool=dataclasses.replace(
+        registry_fake["echotool"], active=False))
+    rl = RateLimiter(Limits(max_rps_per_host=100, max_global_concurrency=4,
+                            max_requests_per_run=1, safe_mode=False))   # cap of 1
+    runner, _ = _runner(fake_scope, reg, which, tmp_path, rate_limiter=rl)
+    # 3 in-scope targets, cap of 1: an active tool would trip; passive must not
+    res = runner.run("echotool", ["foo.acme.com", "bar.acme.com", "baz.acme.com"],
+                     tmp_path / "out")
+    assert len(res.invocations) == 3
+    assert all(iv.exit_code == 0 for iv in res.invocations)
+    assert rl.request_count == 0
+
+
+def test_active_target_tool_still_trips_breaker(fake_scope, registry_fake, fake_tools, tmp_path):
+    """The breaker stays fully in force for active, target-hitting batch tools."""
+    _, which = fake_tools   # filetool is active (not resolver) by default
+    rl = RateLimiter(Limits(max_rps_per_host=100, max_global_concurrency=4,
+                            max_requests_per_run=1, safe_mode=False))
+    runner, _ = _runner(fake_scope, registry_fake, which, tmp_path, rate_limiter=rl)
+    with pytest.raises(CircuitBreakerTripped):
+        runner.run("filetool", ["a.acme.com", "b.acme.com"], tmp_path / "out")

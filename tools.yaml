@@ -70,7 +70,14 @@ tools:
     input: targets_file
     output: hosts
     active: true
-    args: "-l {targets_file} -silent -a -resp -rl {rps} -o {output}"
+    # resolver: queries PUBLIC DNS resolvers, not the target host -> exempt from
+    # the per-host rate limiter and the max_requests_per_run circuit breaker.
+    # No -rl: it must NOT be throttled to the Amazon safe-mode rate; dnsx uses its
+    # own default (high) resolver rate and finishes ~57k hosts in 1-2 minutes.
+    resolver: true
+    # -nc: no ANSI color in the -o file (dnsx colorizes by default, which breaks
+    #      downstream parsing). parse_dnsx also strips color defensively.
+    args: "-l {targets_file} -silent -nc -a -resp -o {output}"
     install: "go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest"
 
   tlsx:

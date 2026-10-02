@@ -172,3 +172,64 @@ def test_dnsx_not_allowlisted_raises(scope, registry, tmp_path):
 def _write(path, text):
     Path(path).write_text(text)
     return path
+
+
+# --------------------------------------------------------------------------- #
+# dnsx must NOT be throttled to the Amazon per-host rate (queries resolvers)
+# --------------------------------------------------------------------------- #
+def test_dnsx_args_have_no_rate_flag(registry):
+    args = registry["dnsx"].args
+    assert "-rl" not in args and "{rps}" not in args
+    assert registry["dnsx"].resolver is True
+
+
+def test_timeout_ingests_partial_output_from_sidecar(dns_scope, registry, tmp_path):
+    """A timed-out dnsx may never flush its own -o file; the partial results it
+    printed are in the captured-stdout sidecar '<out>.log'. They must be stored."""
+    stage, store, _ = _stage(dns_scope, registry, tmp_path)
+    rid0 = store.start_run("passive_recon")
+    for h in ("www.amazon.com", "cdn.amazon.com"):
+        store.upsert_asset("subdomain", h, rid0)
+
+    def killed(hosts, out_dir):
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        out = Path(out_dir) / "dnsx.out"
+        out.write_text("")                              # -o never flushed: empty
+        (Path(out_dir) / "dnsx.out.log").write_text(    # captured stdout: partial
+            "www.amazon.com [A] [1.2.3.4]\ncdn.amazon.com [A] [5.6.7.8]\n")
+        return [SimpleNamespace(output_path=str(out), exit_code=-1, timed_out=True)]
+
+    res = stage.run(executor=killed)
+    assert res.resolved == 2                            # recovered from the sidecar
+    assert sorted(store.keys_where_flag("subdomain", "resolves", True)) == \
+        ["cdn.amazon.com", "www.amazon.com"]
+    assert store.get_run(res.run_id).status == "completed"
+
+
+# --------------------------------------------------------------------------- #
+# REAL dnsx output: ANSI color escapes + CRLF (the gap the \n fixtures missed).
+# dnsx -a -resp colorizes its -o file by default: "[<esc>35mA<esc>0m] [<esc>32mIP<esc>0m]".
+# --------------------------------------------------------------------------- #
+def test_parse_dnsx_real_colored_crlf_output(tmp_path):
+    ESC = "\x1b"
+    def rec(host, rtype, val, tcol, vcol):
+        return (f"{host} [{ESC}[{tcol}m{rtype}{ESC}[0m] "
+                f"[{ESC}[{vcol}m{val}{ESC}[0m] \r\n")   # trailing space + CRLF, like dnsx
+    f = tmp_path / "dnsx.out"
+    f.write_bytes((
+        rec("154-60.amazon.com", "A", "204.177.154.60", "35", "32")
+        + rec("154-60.amazon.com", "A", "204.177.154.61", "35", "32")   # 2nd A, same host
+        + rec("cdn.amazon.com", "CNAME", "d1.cloudfront.net", "35", "36")
+        + rec("ipv6.amazon.com", "AAAA", "2600:9000::1", "35", "32")
+    ).encode("utf-8"))
+    res = {r.host: r for r in parse_dnsx(f)}
+    assert set(res) == {"154-60.amazon.com", "cdn.amazon.com", "ipv6.amazon.com"}
+    assert res["154-60.amazon.com"].a == ["204.177.154.60", "204.177.154.61"]
+    assert res["cdn.amazon.com"].cname == ["d1.cloudfront.net"]
+    assert res["ipv6.amazon.com"].aaaa == ["2600:9000::1"]
+    # no escape bytes leaked into stored values
+    assert all("\x1b" not in v for r in res.values() for v in r.a + r.aaaa + r.cname)
+
+
+def test_dnsx_args_disable_color(registry):
+    assert "-nc" in registry["dnsx"].args.split()

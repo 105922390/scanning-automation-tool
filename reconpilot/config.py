@@ -223,6 +223,8 @@ class ToolSpec:
     ua_arg: str = ""          # how this tool takes a custom User-Agent, e.g. "-H 'User-Agent: {user_agent}'"
     no_oob_arg: str = ""      # flag(s) disabling third-party callbacks, e.g. "-no-interactsh"
     requires_oob: bool = False  # tool can ONLY work via a third-party callback -> skip when OOB disabled
+    resolver: bool = False    # active, but queries public DNS resolvers (dnsx), NOT the target
+                              # -> exempt from the per-host limiter + request breaker
 
 
 def load_tools(path: str | Path) -> dict[str, ToolSpec]:
@@ -250,5 +252,6 @@ def load_tools(path: str | Path) -> dict[str, ToolSpec]:
             ua_arg=str(spec.get("ua_arg", "") or ""),
             no_oob_arg=str(spec.get("no_oob_arg", "") or ""),
             requires_oob=bool(spec.get("requires_oob", False)),
+            resolver=bool(spec.get("resolver", False)),
         )
     return out
