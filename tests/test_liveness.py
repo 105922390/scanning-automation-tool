@@ -209,10 +209,31 @@ def test_httpx_argv_carries_user_agent_via_runner(live_scope, registry, tmp_path
     assert "-fr" not in cmd            # scope safety: redirects are NOT followed
 
 
-def test_seam_unimplemented_until_wired(live_scope, registry, tmp_path):
-    stage, store, _ = _stage(live_scope, registry, tmp_path)
+class _FakeHttpxRunner:
+    """Stands in for GuardedRunner: records the call and writes canned httpx
+    JSONL output. No subprocess, no network."""
+    def __init__(self, records):
+        self.records = records
+        self.calls = []
+
+    def run(self, tool, hosts, out_dir, **kw):
+        self.calls.append((tool, list(hosts)))
+        p = _jsonl(Path(out_dir) / "httpx.json", self.records)
+        return SimpleNamespace(invocations=[
+            SimpleNamespace(output_path=str(p), exit_code=0, timed_out=False)])
+
+
+def test_default_run_path_calls_runner_via_invoke_tool(live_scope, registry, tmp_path):
+    # invoke_tool is wired to self.runner.run; run() with NO executor must go
+    # through it. Uses a fake runner, so nothing touches the network.
+    store = Store(":memory:")
+    audit = AuditLog(tmp_path / "audit.jsonl", engagement="t")
+    runner = _FakeHttpxRunner([
+        {"input": "www.acme.com", "url": "https://www.acme.com/", "status_code": 200}])
+    stage = LivenessStage(live_scope, registry, store, audit, runner, tmp_path / "out")
     store.upsert_asset("subdomain", "www.acme.com", store.start_run("dns_resolve"),
                        attrs={"resolves": True})
-    # run() without an executor hits the seam -> NotImplementedError surfaces
-    with pytest.raises(NotImplementedError):
-        stage.run()
+    res = stage.run(limit=1)
+    assert runner.calls == [("httpx", ["www.acme.com"])]   # wired default path used
+    assert res.live == 1 and store.get_run(res.run_id).status == "completed"
+    assert store.keys_where_flag("subdomain", "live", True) == ["www.acme.com"]

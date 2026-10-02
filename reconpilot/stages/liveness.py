@@ -207,27 +207,8 @@ class LivenessStage:
 
     # -- execution seam (wire this to the real runner) ----------------------- #
     def invoke_tool(self, hosts: list[str], out_dir: Path):
-        """SEAM — left unimplemented on purpose. THIS is the call that sends real
-        HTTP to targets; wire it through the EXISTING GuardedRunner so it inherits
-        every guard already proven by tests:
-
-          * engagement User-Agent injection (ToolSpec.ua_arg -> _http_policy)
-          * per-host rate limit + global concurrency cap + run circuit breaker
-          * scope gate on every target (httpx is a batch tool: one call, the
-            runner writes the input file and paces via -rl {rps})
-
-        Return the runner's invocations (objects with ``.output_path``,
-        ``.exit_code``, ``.timed_out``). The ``run()`` orchestration below —
-        input = resolved hosts only, incremental ingest, redirect-drop + audit,
-        interrupt-safe finalize — is complete and tested with a fake executor.
-
-            # TODO(you): execute httpx via the guarded runner (active, UA-gated)
-            # res = self.runner.run(self.TOOL, hosts, out_dir)   # NOT seed mode
-            # return res.invocations
-        """
-        raise NotImplementedError(
-            "LivenessStage.invoke_tool is a seam; wire it to self.runner.run "
-            "or pass executor=... to run(). See the docstring.")
+        res = self.runner.run(self.TOOL, hosts, out_dir)   # batch mode, not seed
+        return res.invocations
 
     # -- orchestration ------------------------------------------------------- #
     def run(self, dry_run: bool = False,

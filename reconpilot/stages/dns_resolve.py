@@ -174,25 +174,8 @@ class DnsResolveStage:
 
     # -- execution seam (wire this to the real runner) ----------------------- #
     def invoke_tool(self, hosts: list[str], out_dir: Path):
-        """SEAM — left unimplemented on purpose.
-
-        Run dnsx over ``hosts`` through the EXISTING GuardedRunner, exactly like
-        the passive stage does, and return its invocations (objects exposing
-        ``.output_path``, ``.exit_code`` and ``.timed_out``). dnsx is a batch
-        (``-l {targets_file}``) tool, so one call handles the whole list and the
-        runner writes the input file + enforces its own ``-rl {rps}`` pacing.
-
-        The ``run()`` orchestration below (input selection, incremental ingest,
-        interrupt-safe finalize, diff) is complete and tested with a fake
-        executor; only this network call is left for you to wire:
-
-            # TODO(you): execute dnsx via the guarded runner
-            # res = self.runner.run(self.TOOL, hosts, out_dir)   # NOT seed mode
-            # return res.invocations
-        """
-        raise NotImplementedError(
-            "DnsResolveStage.invoke_tool is a seam; wire it to self.runner.run "
-            "or pass executor=... to run(). See the docstring.")
+            res = self.runner.run(self.TOOL, hosts, out_dir)   # batch mode, not seed
+            return res.invocations
 
     # -- orchestration ------------------------------------------------------- #
     def run(self, dry_run: bool = False,

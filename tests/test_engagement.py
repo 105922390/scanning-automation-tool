@@ -211,9 +211,23 @@ def test_cli_run_liveness_dry_run_reports_input(capsys, tmp_path, amazon_copy):
     assert rc == 0 and "Running liveness (httpx)" in out and "limit 1" in out
 
 
-def test_cli_run_liveness_without_wiring_reports_seam(capsys, tmp_path, amazon_copy):
-    # a non-dry run hits the unwired invoke_tool seam -> clean message, rc 3
+def test_cli_run_liveness_errors_cleanly_when_httpx_absent(capsys, tmp_path, amazon_copy):
+    # invoke_tool is wired now. With a registry that has NO httpx, the run fails
+    # fast via the tool-availability guard (ToolNotAvailable -> rc 1) and never
+    # executes a real tool. Deterministic on any machine (httpx installed or not).
+    reg = tmp_path / "tools-no-httpx.yaml"
+    reg.write_text(
+        "tools:\n"
+        "  dnsx:\n"
+        "    stage: dns_resolve\n"
+        "    binary: dnsx\n"
+        "    input: targets_file\n"
+        "    output: hosts\n"
+        "    active: true\n"
+        "    args: \"-l {targets_file} -o {output}\"\n")
     rc = cli.main(["-e", "amazon-vrp", "--engagements-dir", str(amazon_copy),
-                   "--run-liveness", "--limit-hosts", "1", "--out", str(tmp_path / "r")])
-    assert rc == 3
-    assert "not wired yet" in capsys.readouterr().err
+                   "--run-liveness", "--limit-hosts", "1",
+                   "--tools", str(reg), "--out", str(tmp_path / "r")])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "httpx" in err and "tools.yaml" in err
