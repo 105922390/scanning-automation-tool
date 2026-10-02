@@ -1,0 +1,90 @@
+# =============================================================================
+# ReconPilot engagement scope
+# =============================================================================
+# This file is the SINGLE SOURCE OF TRUTH for what ReconPilot is allowed to
+# touch. The scope_guard module validates EVERY target against this before any
+# tool runs. If a host is not covered by in_scope (or is caught by
+# out_of_scope), it is rejected and logged — never scanned.
+#
+# Rule precedence: out_of_scope ALWAYS wins over in_scope.
+#
+# Fill one of these out per bug-bounty program / engagement. Only run against
+# programs whose rules explicitly permit automated scanning at the rate you set.
+# =============================================================================
+
+engagement:
+  name: "acme-public-bbp"              # short slug, used for the DB + log filenames
+  program_url: "https://hackerone.com/acme"   # link to the program's policy page
+  platform: "hackerone"               # hackerone | bugcrowd | intigriti | self-hosted | vdp
+  authorized_by: "Julian"             # who confirmed this engagement is authorized
+  authorized_date: "2026-10-01"       # when you confirmed scope + rules
+  notes: >
+    Program permits automated tooling. Rate-limit requested <= 5 rps per host.
+    No scanning of *.internal.acme.com. Report via platform only.
+
+# -----------------------------------------------------------------------------
+# IN SCOPE
+# Accepts: apex domains, wildcards (*.example.com), explicit hosts, and CIDRs.
+# A wildcard authorizes subdomains only — NOT the apex unless you also list it.
+# -----------------------------------------------------------------------------
+in_scope:
+  domains:
+    - "acme.com"
+    - "*.acme.com"
+    - "acme-api.com"
+    - "*.acme-api.com"
+  cidrs:
+    - "203.0.113.0/24"                # only if the program explicitly lists IP ranges
+
+# -----------------------------------------------------------------------------
+# OUT OF SCOPE  (takes precedence over everything in in_scope)
+# Put every explicitly-forbidden asset here. When in doubt, add it here.
+# -----------------------------------------------------------------------------
+out_of_scope:
+  domains:
+    - "*.internal.acme.com"
+    - "legacy.acme.com"
+    - "blog.acme.com"                 # often WordPress/third-party — check program rules
+    - "status.acme.com"              # third-party hosted
+  cidrs: []
+
+# -----------------------------------------------------------------------------
+# RATE / POLITENESS
+# scope_guard + the rate limiter enforce these. Keep them conservative.
+# -----------------------------------------------------------------------------
+limits:
+  max_rps_per_host: 5                 # hard cap per target host
+  max_global_concurrency: 20          # total concurrent tool workers
+  max_requests_per_run: 50000         # circuit-breaker: abort a run that exceeds this
+  safe_mode: true                     # when true, halves all rates/concurrency
+
+# -----------------------------------------------------------------------------
+# TOOL ALLOWLIST
+# Only tools named here (and present in tools.yaml) may run in this engagement.
+# Remove any a program forbids (e.g. some ban active port scanning / fuzzing).
+# -----------------------------------------------------------------------------
+allowed_tools:
+  - subfinder
+  - amass
+  - dnsx
+  - tlsx
+  - httpx
+  - naabu
+  - katana
+  - gau
+  - waybackurls
+  - gowitness
+  - nuclei
+  - ffuf
+  - dalfox
+  - trufflehog
+  - gf
+
+# -----------------------------------------------------------------------------
+# BEHAVIOR FLAGS  (read-only posture — leave these as-is unless you know why)
+# -----------------------------------------------------------------------------
+posture:
+  allow_active_exploitation: false    # pipeline never auto-exploits; keep false
+  allow_bruteforce: false             # no credential/login brute-forcing
+  allow_form_submission: false        # no auto-submitting forms
+  require_plan_confirmation: true     # GUI shows the plan and waits for your OK

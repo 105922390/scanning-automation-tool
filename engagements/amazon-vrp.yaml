@@ -1,0 +1,167 @@
+# =============================================================================
+# ReconPilot engagement — Amazon Vulnerability Research Program (VRP)
+# Policy read 2026-10-01 (policy dated 8/13/2026).
+# Save as engagements/amazon-vrp.yaml
+#
+# BEFORE USE:
+#   1) Replace YOUR_H1_USERNAME below with your real HackerOne username.
+#   2) Your scope_guard must support out_of_scope.host_label_contains and
+#      host_label_equals (see notes) — these are REQUIRED to keep Amazon's
+#      aws/test/qa/etc hosts out. Without them the guard will false-accept.
+#   3) Your runner must inject http.user_agent into every ACTIVE tool, and
+#      disable third-party OOB (interactsh) for nuclei/dalfox.
+# =============================================================================
+
+engagement:
+  name: "amazon-vrp"
+  program_url: "https://hackerone.com/amazon_vrp"   # VRP policy page
+  platform: "hackerone"
+  authorized_by: "Julian"
+  authorized_date: "2026-10-01"
+  notes: >
+    Amazon VRP. Automated scanners allowed at <=5 rps to a single service, and
+    ONLY with User-Agent amazonvrpresearcher_<h1user> — missing it gets your
+    IP/account auto-blocked. No third-party callback infra (no public
+    interactsh / XSS Hunter) — self-hosted only. SSRF testing uses Amazon's
+    own sheriff. Raw scanner output is OUT OF SCOPE — every hit is a lead
+    needing a manual PoC with real impact. Reward eligibility: 18+, excludes
+    US-sanctioned-country residents. Legal Safe Harbor applies to good-faith,
+    in-scope, in-policy testing only.
+
+# -----------------------------------------------------------------------------
+# HTTP behavior  (NEW schema block the runner must honor)
+# -----------------------------------------------------------------------------
+http:
+  user_agent: "amazonvrpresearcher_floopy"   # REQUIRED on all active requests
+  require_user_agent: true        # runner refuses to launch an active tool without it
+  no_third_party_oob: true        # disable nuclei interactsh + dalfox external callbacks
+  drop_on_redirect_to:            # post-request: discard results that land on these hosts
+    - "*.aws.amazon.com"
+    - "midway-auth.amazon.com"
+
+# -----------------------------------------------------------------------------
+# IN SCOPE  — retail marketplaces are wildcard-scoped (*.amazon.<tld>).
+# Apex included because device web apps live on amazon.com paths.
+# -----------------------------------------------------------------------------
+in_scope:
+  domains:
+    - "amazon.com"
+    - "*.amazon.com"
+    - "amazon.co.uk"
+    - "*.amazon.co.uk"
+    - "amazon.in"
+    - "*.amazon.in"
+    - "amazon.de"
+    - "*.amazon.de"
+    - "amazon.fr"
+    - "*.amazon.fr"
+    - "amazon.co.jp"
+    - "*.amazon.co.jp"
+    - "amazon.ca"
+    - "*.amazon.ca"
+    - "amazon.cn"
+    - "*.amazon.cn"
+    - "amazon.it"
+    - "*.amazon.it"
+    - "amazon.es"
+    - "*.amazon.es"
+    - "amazon.nl"
+    - "*.amazon.nl"
+    - "amazon.ae"
+    - "*.amazon.ae"
+    - "amazon.sg"
+    - "*.amazon.sg"
+    - "amazon.se"
+    - "*.amazon.se"
+    - "amazon.sa"
+    - "*.amazon.sa"
+    - "amazon.eg"
+    - "*.amazon.eg"
+    - "amazon.pl"
+    - "*.amazon.pl"
+    - "amazon.com.au"
+    - "*.amazon.com.au"
+    - "amazon.com.tr"
+    - "*.amazon.com.tr"
+    - "amazon.com.br"
+    - "*.amazon.com.br"
+    - "amazon.com.mx"
+    - "*.amazon.com.mx"
+    - "amazon.com.be"
+    - "*.amazon.com.be"
+    - "amazon.co.za"
+    - "*.amazon.co.za"
+    - "amazon.com.ng"
+    - "*.amazon.com.ng"
+    - "amazon.com.co"
+    - "*.amazon.com.co"
+    - "amazon.cl"
+    - "*.amazon.cl"
+    # Device-related API on a separate apex:
+    - "api.amazonalexa.com"
+    - "*.amazonalexa.com"
+  cidrs: []   # none; and do NOT add AWS IP space — it's explicitly out of scope
+
+# -----------------------------------------------------------------------------
+# OUT OF SCOPE  (takes precedence over in_scope)
+# host_label_contains / host_label_equals are NEW match types — see notes.
+# Over-matching here is SAFE (only ever scans less).
+# -----------------------------------------------------------------------------
+out_of_scope:
+  domains:
+    - "*.dev"      # "anything that ends with *.dev"
+    - "*.a2z"      # "anything that is .a2z"
+  cidrs: []        # AWS IP space is dynamic — load from ip-ranges.amazonaws.com at runtime if ever using IP targets
+  host_label_contains:
+    - "aws"        # policy: "anything with aws in the subdomain"
+  host_label_equals:     # non-production environments
+    - "test"
+    - "qa"
+    - "integ"
+    - "preprod"
+    - "gamma"
+    - "beta"
+  # Can't be enforced statically (handle at runtime / manually):
+  #  - anything that REDIRECTS to AWS or midway-auth  -> see http.drop_on_redirect_to
+  #  - subsidiaries (e.g. Twitch), Whole Foods, physical stores
+  #  - "user-aliases" and "regions" style non-prod hosts (too vague to auto-match safely)
+
+# -----------------------------------------------------------------------------
+# RATE / POLITENESS
+# -----------------------------------------------------------------------------
+limits:
+  max_rps_per_host: 5            # policy: <=5 rps to a single service
+  max_global_concurrency: 5      # no explicit cap in policy; keep conservative
+  max_requests_per_run: 50000
+  safe_mode: true                # halves to ~2 rps for first runs
+
+# -----------------------------------------------------------------------------
+# TOOL ALLOWLIST  — trimmed for this program.
+#   dropped naabu (open ports / banner grabbing out of scope)
+#   dropped tlsx  (TLS/cert out of scope)
+#   dnsx kept as resolver only
+#   nuclei/ffuf/dalfox = LEADS ONLY, and only with UA set + no third-party OOB
+# -----------------------------------------------------------------------------
+allowed_tools:
+  - subfinder        # passive
+  - amass            # passive
+  - dnsx             # resolver only
+  - httpx            # active — UA required
+  - katana           # active — UA required
+  - gau              # passive
+  - waybackurls      # passive
+  - gowitness        # active — UA required
+  - nuclei           # active, LEADS ONLY — UA required, interactsh OFF
+  - ffuf             # active, LEADS ONLY — UA required, keep rate tight
+  - dalfox           # active, LEADS ONLY — UA required, self-hosted callback only
+  - trufflehog       # local, scans fetched content
+  - gf               # local, greps URL lists
+
+# -----------------------------------------------------------------------------
+# BEHAVIOR FLAGS
+# -----------------------------------------------------------------------------
+posture:
+  allow_active_exploitation: false   # no post-exploitation (policy ROE #4)
+  allow_bruteforce: false            # no brute force / DoS (policy ROE #5)
+  allow_form_submission: false       # no contact/support/Contact-Us interaction (policy ROE #9)
+  require_plan_confirmation: true

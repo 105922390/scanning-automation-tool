@@ -1,0 +1,180 @@
+# =============================================================================
+# ReconPilot tool registry
+# =============================================================================
+# Data-driven definition of every CLI tool the orchestrator can run. The
+# generic runner reads this so you can add/remove tools WITHOUT touching core
+# code. A tool only runs if it is (a) defined here, (b) in scope.yaml's
+# allowed_tools, and (c) detected on the system.
+#
+# Placeholders the runner substitutes at execution time:
+#   {target}        single host/domain
+#   {targets_file}  path to a newline-delimited file of in-scope targets
+#   {output}        path the runner assigns for this tool's output
+#   {rps}           per-host rate derived from scope.yaml limits
+#   {concurrency}   worker count derived from scope.yaml limits
+#   {wordlist}      path to the active wordlist (for fuzzers)
+#   {templates}     nuclei templates dir/selector
+#
+# stage:   which pipeline stage this belongs to
+# input:   what the runner feeds it (domain | targets_file | urls_file | hosts_file)
+# output:  normalized type the parser should emit (subdomains | hosts | ports |
+#          urls | screenshots | findings | secrets)
+# active:  true = sends traffic to the target (gated + rate-limited);
+#          false = passive / third-party data source
+# install: shown to you verbatim if the binary is missing (never auto-installed)
+# =============================================================================
+
+tools:
+
+  # ---- passive_recon -------------------------------------------------------
+  subfinder:
+    stage: passive_recon
+    binary: subfinder
+    input: domain
+    output: subdomains
+    active: false
+    args: "-d {target} -all -silent -o {output}"
+    install: "go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
+
+  amass:
+    stage: passive_recon
+    binary: amass
+    input: domain
+    output: subdomains
+    active: false
+    args: "enum -passive -d {target} -o {output}"
+    install: "go install -v github.com/owasp-amass/amass/v4/...@master"
+
+  gau:
+    stage: passive_recon
+    binary: gau
+    input: domain
+    output: urls
+    active: false
+    args: "{target} --o {output}"
+    install: "go install github.com/lc/gau/v2/cmd/gau@latest"
+
+  waybackurls:
+    stage: passive_recon
+    binary: waybackurls
+    input: domain
+    output: urls
+    active: false
+    args: "{target}"              # prints to stdout; runner captures to {output}
+    install: "go install github.com/tomnomnom/waybackurls@latest"
+
+  # ---- dns_resolve ---------------------------------------------------------
+  dnsx:
+    stage: dns_resolve
+    binary: dnsx
+    input: targets_file
+    output: hosts
+    active: true
+    args: "-l {targets_file} -silent -a -resp -rl {rps} -o {output}"
+    install: "go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest"
+
+  tlsx:
+    stage: dns_resolve
+    binary: tlsx
+    input: targets_file
+    output: hosts
+    active: true
+    args: "-l {targets_file} -silent -san -cn -rl {rps} -o {output}"
+    install: "go install github.com/projectdiscovery/tlsx/cmd/tlsx@latest"
+
+  # ---- liveness ------------------------------------------------------------
+  httpx:
+    stage: liveness
+    binary: httpx
+    input: targets_file
+    output: hosts
+    active: true
+    args: "-l {targets_file} -silent -sc -title -tech-detect -rl {rps} -o {output}"
+    ua_arg: "-H 'User-Agent: {user_agent}'"
+    install: "go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest"
+
+  gowitness:
+    stage: liveness
+    binary: gowitness
+    input: urls_file
+    output: screenshots
+    active: true
+    args: "scan file -f {targets_file} --screenshot-path {output} --delay 2"
+    ua_arg: "--user-agent {user_agent}"
+    install: "go install github.com/sensepost/gowitness@latest"
+
+  # ---- port_scan -----------------------------------------------------------
+  naabu:
+    stage: port_scan
+    binary: naabu
+    input: targets_file
+    output: ports
+    active: true
+    args: "-l {targets_file} -silent -rate {rps} -top-ports 1000 -o {output}"
+    install: "go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest"
+
+  # ---- content_discovery ---------------------------------------------------
+  katana:
+    stage: content_discovery
+    binary: katana
+    input: urls_file
+    output: urls
+    active: true
+    args: "-list {targets_file} -silent -jc -rl {rps} -c {concurrency} -o {output}"
+    ua_arg: "-H 'User-Agent: {user_agent}'"
+    install: "go install github.com/projectdiscovery/katana/cmd/katana@latest"
+
+  ffuf:
+    stage: content_discovery
+    binary: ffuf
+    input: urls_file
+    output: urls
+    active: true
+    # -rate caps requests/sec; runner injects one URL at a time as {target}
+    args: "-u {target}/FUZZ -w {wordlist} -rate {rps} -ac -of json -o {output}"
+    ua_arg: "-H 'User-Agent: {user_agent}'"
+    install: "go install github.com/ffuf/ffuf/v2@latest"
+
+  # ---- signal_scan ---------------------------------------------------------
+  nuclei:
+    stage: signal_scan
+    binary: nuclei
+    input: urls_file
+    output: findings
+    active: true
+    # Default to lower-noise template groups; expand via the GUI prompt.
+    args: "-l {targets_file} -silent -rl {rps} -c {concurrency} -t {templates} -jsonl -o {output}"
+    templates_default: "cves/,misconfiguration/,exposures/,default-logins/"
+    ua_arg: "-H 'User-Agent: {user_agent}'"
+    no_oob_arg: "-no-interactsh"   # disable projectdiscovery's public interactsh (third-party OOB)
+    install: "go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"
+
+  dalfox:
+    stage: signal_scan
+    binary: dalfox
+    input: urls_file
+    output: findings
+    active: true
+    args: "file {targets_file} --delay 500 --format json --output {output}"
+    ua_arg: "-H 'User-Agent: {user_agent}'"
+    # dalfox uses NO blind-XSS server unless -b is passed; we never pass it, so it
+    # is already compliant with no_third_party_oob (nothing to add / nothing to skip).
+    install: "go install github.com/hahwul/dalfox/v2@latest"
+
+  trufflehog:
+    stage: signal_scan
+    binary: trufflehog
+    input: urls_file
+    output: secrets
+    active: false              # scans fetched JS/content already pulled locally
+    args: "filesystem {target} --json"
+    install: "https://github.com/trufflesecurity/trufflehog#installation"
+
+  gf:
+    stage: signal_scan
+    binary: gf
+    input: urls_file
+    output: urls
+    active: false              # pattern-greps existing URL lists, no traffic
+    args: "-f {targets_file}"
+    install: "go install github.com/tomnomnom/gf@latest  (+ copy gf-patterns to ~/.gf)"
