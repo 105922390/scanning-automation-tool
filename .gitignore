@@ -1,0 +1,14 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# Per-engagement runtime data (engagement .yaml configs stay tracked)
+engagements/*/recon.sqlite
+engagements/*/*.jsonl
+engagements/*/logs/
+engagements/*/runs/
