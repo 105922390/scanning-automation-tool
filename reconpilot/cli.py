@@ -34,6 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="run the passive_recon stage (subfinder/amass) for the active engagement")
     p.add_argument("--dry-run", action="store_true",
                    help="with --run-passive: show the plan (seeds + commands), don't execute")
+    p.add_argument("--only", metavar="TOOL[,TOOL]",
+                   help="with --run-passive: run only these passive tools "
+                        "(e.g. --only subfinder); must be allowlisted passive tools")
     p.add_argument("--tools", default="tools.yaml", metavar="FILE",
                    help="tool registry file (default: tools.yaml)")
     p.add_argument("--out", metavar="DIR",
@@ -89,7 +92,13 @@ def _run_passive(scope, args) -> int:
     audit = AuditLog(eng_base / "audit.jsonl", engagement=scope.engagement.name)
     store = Store.open_for_engagement(scope.engagement.name, base_dir=args.engagements_dir)
     runner = GuardedRunner(scope, registry, audit, force_safe_mode=args.safe_mode)
-    stage = PassiveReconStage(scope, registry, store, audit, runner, out)
+    only = args.only.split(",") if args.only else None
+    try:
+        stage = PassiveReconStage(scope, registry, store, audit, runner, out, only=only)
+    except ValueError as e:
+        store.close()
+        print(f"error: {e}", file=sys.stderr)
+        return 2
 
     print(f"\nRunning passive_recon ({', '.join(stage.tools)}) on "
           f"{len(stage.enumeration_roots())} roots"

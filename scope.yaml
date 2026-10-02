@@ -57,6 +57,9 @@ limits:
   max_global_concurrency: 20          # total concurrent tool workers
   max_requests_per_run: 50000         # circuit-breaker: abort a run that exceeds this
   safe_mode: true                     # when true, halves all rates/concurrency
+  max_tool_seconds: 300               # kill any single tool invocation after 5 min
+  tool_timeouts:                      # per-tool overrides (seconds)
+    amass: 120                        # amass is slow; cap it at 2 min per root
 
 # -----------------------------------------------------------------------------
 # TOOL ALLOWLIST

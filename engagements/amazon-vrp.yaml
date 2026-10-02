@@ -134,6 +134,9 @@ limits:
   max_global_concurrency: 5      # no explicit cap in policy; keep conservative
   max_requests_per_run: 50000
   safe_mode: true                # halves to ~2 rps for first runs
+  max_tool_seconds: 300          # kill any single tool invocation after 5 min
+  tool_timeouts:                 # per-tool overrides (seconds)
+    amass: 120                   # amass is slow; cap it at 2 min per root
 
 # -----------------------------------------------------------------------------
 # TOOL ALLOWLIST  — trimmed for this program.

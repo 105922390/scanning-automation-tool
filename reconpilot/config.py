@@ -18,12 +18,22 @@ from .errors import ConfigError
 # --------------------------------------------------------------------------- #
 # Limits
 # --------------------------------------------------------------------------- #
+DEFAULT_MAX_TOOL_SECONDS = 300
+
+
 @dataclass(frozen=True)
 class Limits:
     max_rps_per_host: float
     max_global_concurrency: int
     max_requests_per_run: int
     safe_mode: bool
+    # Wall-clock cap on ONE tool invocation; on expiry the runner kills the
+    # process tree and moves on. tool_timeouts overrides it per tool (e.g. amass).
+    max_tool_seconds: int = DEFAULT_MAX_TOOL_SECONDS
+    tool_timeouts: dict[str, int] = field(default_factory=dict)
+
+    def tool_timeout(self, tool: str) -> int:
+        return self.tool_timeouts.get(tool, self.max_tool_seconds)
 
     def effective(self, force_safe_mode: bool = False) -> "Limits":
         """Return the limits actually enforced at runtime.
@@ -114,6 +124,20 @@ def _as_list(v: Any) -> list[str]:
     return [str(x).strip() for x in v if str(x).strip()]
 
 
+def _positive_int(v: Any, where: str) -> int:
+    if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+        raise ConfigError(f"{where}: expected a positive integer (seconds), got {v!r}")
+    return v
+
+
+def _tool_timeouts(v: Any) -> dict[str, int]:
+    if v is None:
+        return {}
+    if not isinstance(v, dict):
+        raise ConfigError(f"limits.tool_timeouts: expected a mapping tool -> seconds, got {v!r}")
+    return {str(k): _positive_int(n, f"limits.tool_timeouts.{k}") for k, n in v.items()}
+
+
 def load_scope(path: str | Path) -> Scope:
     path = Path(path)
     if not path.exists():
@@ -147,6 +171,9 @@ def load_scope(path: str | Path) -> Scope:
         max_global_concurrency=int(lim.get("max_global_concurrency", 10)),
         max_requests_per_run=int(lim.get("max_requests_per_run", 50000)),
         safe_mode=bool(lim.get("safe_mode", True)),
+        max_tool_seconds=_positive_int(
+            lim.get("max_tool_seconds", DEFAULT_MAX_TOOL_SECONDS), "limits.max_tool_seconds"),
+        tool_timeouts=_tool_timeouts(lim.get("tool_timeouts")),
     )
 
     allowed = frozenset(_as_list(raw.get("allowed_tools")))

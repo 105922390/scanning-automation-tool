@@ -20,8 +20,10 @@ posture flags + the plan-confirm step); the runner is the mechanism, not the pol
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
+import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -103,6 +105,53 @@ def build_command(spec: ToolSpec, binary: str, *,
 
 
 # --------------------------------------------------------------------------- #
+# Process-tree control
+# --------------------------------------------------------------------------- #
+# Grace period for the tree to die and its pipes to drain after a kill.
+_KILL_GRACE_S = 10
+
+
+def _spawn(cmd: list[str]) -> subprocess.Popen:
+    """Start ``cmd`` as the root of its own process group/session, so a timeout
+    can kill everything it spawned — not just the immediate child (on Windows
+    that may be a cmd.exe wrapper around the real tool)."""
+    kw: dict = {}
+    if os.name == "nt":
+        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kw["start_new_session"] = True
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace",
+                            shell=False, **kw)
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill ``proc`` and all of its descendants.
+
+    Windows: ``taskkill /F /T`` walks the child tree (Popen.kill() would only
+    TerminateProcess the direct child, leaving the real tool running and holding
+    our pipes). POSIX: SIGTERM the whole session, then SIGKILL stragglers.
+    """
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                       capture_output=True, check=False)
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        proc.kill()          # direct child, in case the tree kill missed it
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------- #
 # Results
 # --------------------------------------------------------------------------- #
 @dataclass
@@ -115,6 +164,7 @@ class Invocation:
     exit_code: Optional[int] = None  # None = not executed (dry-run / skipped)
     duration_s: float = 0.0
     error: str = ""                  # populated on timeout / exec failure
+    timed_out: bool = False          # killed at the timeout; output may be partial
     stdout_tail: str = ""
     stderr_tail: str = ""
 
@@ -148,13 +198,11 @@ class GuardedRunner:
                  *, rate_limiter: Optional[RateLimiter] = None,
                  guard: Optional[ScopeGuard] = None,
                  force_safe_mode: bool = False,
-                 which: Callable[[str], Optional[str]] = __import__("shutil").which,
-                 default_timeout_s: int = 1800):
+                 which: Callable[[str], Optional[str]] = __import__("shutil").which):
         self.scope = scope
         self.registry = registry
         self.audit = audit
         self.which = which
-        self.default_timeout_s = default_timeout_s
         self.rl = rate_limiter or RateLimiter(scope.limits, force_safe_mode=force_safe_mode)
         # Guard audits through the same engagement log, satisfying its
         # "audit sink must be thread-safe" contract (AuditLog holds a lock).
@@ -173,6 +221,10 @@ class GuardedRunner:
         are audited as ``seed_decision``. Only PASSIVE tools may run in seed
         mode; an active tool is refused. Discovered hosts must still be
         scope-filtered by the caller.
+
+        Each invocation is capped at ``timeout_s`` if given, else the
+        engagement's ``limits.tool_timeouts[tool]``, else
+        ``limits.max_tool_seconds``.
         """
         spec = self.registry.get(tool)
         if spec is None:
@@ -234,6 +286,7 @@ class GuardedRunner:
         conc = eff.max_global_concurrency
         tmpl = templates or spec.templates_default or None
         binary = status.path or spec.binary
+        timeout_s = timeout_s or self.scope.limits.tool_timeout(tool)
 
         if mode == "per_target":
             for dec in allowed_dec:
@@ -366,29 +419,57 @@ class GuardedRunner:
 
     # -- execution ----------------------------------------------------------- #
     def _exec(self, spec, cmd, target, out_path, writes_own, timeout_s) -> Invocation:
-        timeout = timeout_s or self.default_timeout_s
-        run_id = self.audit.log_tool_start(spec.name, target, cmd, stage=spec.stage)
+        """Run one invocation, capped at ``timeout_s``. On timeout the whole
+        process tree is killed, a ``tool_timeout`` event is audited, whatever
+        output was captured is kept, and the caller moves on to the next
+        target/tool. Never raises for tool failures (only on Ctrl-C, after
+        killing the tree)."""
+        run_id = self.audit.log_tool_start(spec.name, target, cmd, stage=spec.stage,
+                                           extra={"timeout_s": timeout_s})
         started = time.monotonic()
         inv = Invocation(spec.name, target, cmd, str(out_path))
+        stdout = stderr = ""
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  timeout=timeout, shell=False)
-            inv.exit_code = proc.returncode
-            inv.stdout_tail = (proc.stdout or "")[-2000:]
-            inv.stderr_tail = (proc.stderr or "")[-2000:]
+            proc = _spawn(cmd)
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout_s)
+                inv.exit_code = proc.returncode
+            except subprocess.TimeoutExpired:
+                _kill_tree(proc)
+                try:
+                    # Retrying communicate() returns everything read so far.
+                    stdout, stderr = proc.communicate(timeout=_KILL_GRACE_S)
+                except subprocess.TimeoutExpired:
+                    pass     # something still holds the pipes; keep what we have
+                inv.exit_code = -1
+                inv.timed_out = True
+                inv.error = f"timeout after {timeout_s}s"
+            except BaseException as e:
+                _kill_tree(proc)   # Ctrl-C etc.: never leave the tool running
+                self.audit.log_tool_end(
+                    run_id, spec.name, target, exit_code=-1,
+                    duration_s=time.monotonic() - started, output_path=str(out_path),
+                    extra={"error": f"interrupted: {type(e).__name__}"})
+                raise
+            stdout, stderr = stdout or "", stderr or ""
             if writes_own:
                 # tool wrote out_path itself; keep stdout/stderr alongside for debugging
-                Path(str(out_path) + ".log").write_text(
-                    (proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
+                Path(str(out_path) + ".log").write_text(stdout + stderr, encoding="utf-8")
             else:
-                Path(out_path).write_text(proc.stdout or "", encoding="utf-8")
-        except subprocess.TimeoutExpired:
-            inv.exit_code = -1
-            inv.error = f"timeout after {timeout}s"
+                Path(out_path).write_text(stdout, encoding="utf-8")
         except (OSError, ValueError) as e:  # exec failure, bad binary, etc.
             inv.exit_code = -1
             inv.error = f"{type(e).__name__}: {e}"
+        inv.stdout_tail = stdout[-2000:]
+        inv.stderr_tail = stderr[-2000:]
         inv.duration_s = round(time.monotonic() - started, 3)
+        if inv.timed_out:
+            self.audit.log_event(
+                "tool_timeout", run_id=run_id, tool=spec.name, target=target,
+                timeout_s=timeout_s, duration_s=inv.duration_s,
+                output_path=str(out_path),
+                partial_output_exists=Path(out_path).exists(),
+                partial_stdout_chars=len(stdout))
         self.audit.log_tool_end(run_id, spec.name, target, exit_code=inv.exit_code,
                                 duration_s=inv.duration_s, output_path=str(out_path),
                                 extra={"error": inv.error} if inv.error else None)

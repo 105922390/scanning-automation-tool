@@ -364,3 +364,114 @@ def test_target_mode_still_rejects_wildcard_base(fake_scope, registry_fake, tmp_
     runner, _ = _runner(fake_scope, registry_fake, lambda n: None, tmp_path)
     res = runner.run("echotool", ["acme-api.com"], tmp_path / "o", dry_run=True)
     assert res.rejected == ["acme-api.com"] and not res.invocations
+
+
+# --------------------------------------------------------------------------- #
+# per-tool timeout (item B)
+# --------------------------------------------------------------------------- #
+_HANG_TOOL = """\
+import subprocess, sys, time
+from pathlib import Path
+t = sys.argv[1]
+# a grandchild, like a real tool's worker; it must die with the tree
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+Path(__file__).with_name(f"child-{t}.pid").write_text(str(child.pid))
+print("partial", t, flush=True)
+time.sleep(60)
+"""
+
+
+def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        k32.GetExitCodeProcess(h, ctypes.byref(code))
+        k32.CloseHandle(h)
+        return code.value == 259                  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_dead(pid: int, within_s: float = 5.0) -> bool:
+    import time
+    deadline = time.monotonic() + within_s
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_timeout_kills_tree_keeps_partial_output_and_continues(scope, tmp_path):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    hang = str(_make_stub(bindir, "hangtool", _HANG_TOOL))
+    reg = {"hangtool": _spec("hangtool", "{target}", stage="passive_recon",
+                             input="domain", active=False)}
+    s = dataclasses.replace(
+        scope, allowed_tools=frozenset({"hangtool"}),
+        limits=dataclasses.replace(scope.limits, max_tool_seconds=2))
+    audit = AuditLog(tmp_path / "audit.jsonl", engagement="t")
+    runner = GuardedRunner(s, reg, audit, which=lambda n: hang)
+
+    res = runner.run("hangtool", ["a.acme.com", "b.acme.com"], tmp_path / "out")
+
+    # both targets attempted: the first timeout did not stop the run
+    assert [iv.target for iv in res.invocations] == ["a.acme.com", "b.acme.com"]
+    for iv in res.invocations:
+        assert iv.timed_out and iv.exit_code == -1
+        assert iv.error == "timeout after 2s"
+        assert iv.duration_s < 2 + 15           # killed, not left to sleep 60s
+        assert f"partial {iv.target}" in open(iv.output_path).read()   # partial kept
+        # the grandchild died with the tree (not just the wrapper)
+        child_pid = int((bindir / f"child-{iv.target}.pid").read_text())
+        assert _wait_dead(child_pid), f"grandchild {child_pid} still running"
+
+    recs = audit.read_all()
+    timeouts = [r for r in recs if r["event"] == "tool_timeout"]
+    assert [t["target"] for t in timeouts] == ["a.acme.com", "b.acme.com"]
+    assert all(t["timeout_s"] == 2 and t["partial_stdout_chars"] > 0 for t in timeouts)
+    assert sum(r["event"] == "tool_end" for r in recs) == 2
+
+
+def test_timeout_resolution_per_tool_override(fake_scope, registry_fake, fake_tools,
+                                              tmp_path):
+    _, which = fake_tools
+    s = dataclasses.replace(fake_scope, limits=dataclasses.replace(
+        fake_scope.limits, max_tool_seconds=42, tool_timeouts={"echotool": 7}))
+    runner, audit = _runner(s, registry_fake, which, tmp_path)
+    runner.run("echotool", ["foo.acme.com"], tmp_path / "o1")              # override
+    runner.run("filetool", ["a.acme.com"], tmp_path / "o2")                # default
+    runner.run("filetool", ["a.acme.com"], tmp_path / "o3", timeout_s=3)   # explicit
+    starts = [(r["tool"], r["timeout_s"]) for r in audit.read_all()
+              if r["event"] == "tool_start"]
+    assert starts == [("echotool", 7), ("filetool", 42), ("filetool", 3)]
+
+
+def test_ctrl_c_during_tool_kills_tree_logs_tool_end_and_reraises(
+        fake_scope, registry_fake, fake_tools, tmp_path, monkeypatch):
+    import reconpilot.runner as rmod
+
+    class _Proc:
+        pid = 0
+        def communicate(self, timeout=None):
+            raise KeyboardInterrupt
+    killed = []
+    monkeypatch.setattr(rmod, "_spawn", lambda cmd: _Proc())
+    monkeypatch.setattr(rmod, "_kill_tree", lambda proc: killed.append(proc))
+    _, which = fake_tools
+    runner, audit = _runner(fake_scope, registry_fake, which, tmp_path)
+    with pytest.raises(KeyboardInterrupt):
+        runner.run("echotool", ["foo.acme.com"], tmp_path / "out")
+    assert len(killed) == 1
+    ends = [r for r in audit.read_all() if r["event"] == "tool_end"]
+    assert ends and ends[0]["error"] == "interrupted: KeyboardInterrupt"

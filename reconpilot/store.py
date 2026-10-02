@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS runs (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     stage      TEXT NOT NULL,
     tool       TEXT NOT NULL DEFAULT '',
-    status     TEXT NOT NULL DEFAULT 'running',   -- running | ok | error
+    status     TEXT NOT NULL DEFAULT 'running',   -- running | ok | error | completed | interrupted
     started_at TEXT NOT NULL,
     ended_at   TEXT,
     note       TEXT NOT NULL DEFAULT ''

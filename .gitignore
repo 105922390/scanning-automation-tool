@@ -8,7 +8,7 @@ __pycache__/
 .DS_Store
 
 # Per-engagement runtime data (engagement .yaml configs stay tracked)
-engagements/*/recon.sqlite
+engagements/*/recon.sqlite*
 engagements/*/*.jsonl
 engagements/*/logs/
 engagements/*/runs/

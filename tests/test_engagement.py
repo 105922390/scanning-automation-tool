@@ -126,3 +126,68 @@ def test_cli_requires_engagement_or_list(capsys):
     rc = cli.main([])
     assert rc == 2
     assert "required" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# limits.max_tool_seconds / limits.tool_timeouts
+# --------------------------------------------------------------------------- #
+def test_tool_timeout_defaults(eng_dir):
+    lim = load_engagement("alpha", eng_dir).limits
+    assert lim.max_tool_seconds == 300 and lim.tool_timeouts == {}
+    assert lim.tool_timeout("amass") == 300
+
+
+def test_real_amazon_vrp_gives_amass_its_own_timeout():
+    lim = load_engagement("amazon-vrp", REPO_ENGAGEMENTS).limits
+    assert lim.tool_timeout("subfinder") == lim.max_tool_seconds == 300
+    assert lim.tool_timeout("amass") == 120
+
+
+def test_tool_timeouts_parsed_and_survive_safe_mode(tmp_path):
+    (tmp_path / "t.yaml").write_text(_MIN_YAML.format(name="t") + (
+        "limits:\n  max_tool_seconds: 60\n  tool_timeouts:\n    amass: 600\n"))
+    lim = load_engagement("t", tmp_path).limits
+    assert lim.tool_timeout("amass") == 600 and lim.tool_timeout("x") == 60
+    assert lim.effective(force_safe_mode=True).tool_timeout("amass") == 600
+
+
+@pytest.mark.parametrize("block", [
+    "  max_tool_seconds: 0\n",
+    "  max_tool_seconds: -5\n",
+    "  max_tool_seconds: soon\n",
+    "  tool_timeouts:\n    amass: 0\n",
+    "  tool_timeouts: [amass]\n",
+])
+def test_bad_tool_timeouts_fail_loudly(tmp_path, block):
+    (tmp_path / "t.yaml").write_text(_MIN_YAML.format(name="t") + "limits:\n" + block)
+    with pytest.raises(ConfigError):
+        load_engagement("t", tmp_path)
+
+
+@pytest.fixture
+def amazon_copy(tmp_path):
+    """The real amazon-vrp.yaml in a temp dir, so CLI tests never touch the
+    live engagement's audit log / database."""
+    d = tmp_path / "engagements"
+    d.mkdir()
+    src = REPO_ENGAGEMENTS / "amazon-vrp.yaml"
+    (d / "amazon-vrp.yaml").write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    return d
+
+
+def test_cli_only_dry_run_plans_subfinder_alone(capsys, tmp_path, amazon_copy):
+    rc = cli.main(["-e", "amazon-vrp", "--engagements-dir", str(amazon_copy),
+                   "--run-passive", "--dry-run", "--only", "subfinder",
+                   "--out", str(tmp_path / "runs")])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Running passive_recon (subfinder)" in out
+    assert "subfinder" in out and "amass" not in out.split("Running passive_recon", 1)[1]
+
+
+def test_cli_only_rejects_ineligible_tool(capsys, tmp_path, amazon_copy):
+    rc = cli.main(["-e", "amazon-vrp", "--engagements-dir", str(amazon_copy),
+                   "--run-passive", "--dry-run", "--only", "httpx",
+                   "--out", str(tmp_path / "runs")])
+    assert rc == 2
+    assert "not eligible" in capsys.readouterr().err
