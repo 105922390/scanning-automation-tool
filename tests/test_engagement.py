@@ -191,3 +191,29 @@ def test_cli_only_rejects_ineligible_tool(capsys, tmp_path, amazon_copy):
                    "--out", str(tmp_path / "runs")])
     assert rc == 2
     assert "not eligible" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# dns_resolve / liveness CLI plumbing (offline: dry-run + seam message)
+# --------------------------------------------------------------------------- #
+def test_cli_run_dns_dry_run_reports_input(capsys, tmp_path, amazon_copy):
+    rc = cli.main(["-e", "amazon-vrp", "--engagements-dir", str(amazon_copy),
+                   "--run-dns", "--dry-run", "--out", str(tmp_path / "r")])
+    out = capsys.readouterr().out
+    assert rc == 0 and "Running dns_resolve (dnsx)" in out and "DRY RUN" in out
+
+
+def test_cli_run_liveness_dry_run_reports_input(capsys, tmp_path, amazon_copy):
+    rc = cli.main(["-e", "amazon-vrp", "--engagements-dir", str(amazon_copy),
+                   "--run-liveness", "--dry-run", "--limit-hosts", "1",
+                   "--out", str(tmp_path / "r")])
+    out = capsys.readouterr().out
+    assert rc == 0 and "Running liveness (httpx)" in out and "limit 1" in out
+
+
+def test_cli_run_liveness_without_wiring_reports_seam(capsys, tmp_path, amazon_copy):
+    # a non-dry run hits the unwired invoke_tool seam -> clean message, rc 3
+    rc = cli.main(["-e", "amazon-vrp", "--engagements-dir", str(amazon_copy),
+                   "--run-liveness", "--limit-hosts", "1", "--out", str(tmp_path / "r")])
+    assert rc == 3
+    assert "not wired yet" in capsys.readouterr().err

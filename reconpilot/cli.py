@@ -32,15 +32,23 @@ def build_parser() -> argparse.ArgumentParser:
                    help="force extra-conservative rates/concurrency (halves them)")
     p.add_argument("--run-passive", action="store_true",
                    help="run the passive_recon stage (subfinder/amass) for the active engagement")
+    p.add_argument("--run-dns", action="store_true",
+                   help="run the dns_resolve stage (dnsx) over the stored in-scope subdomains")
+    p.add_argument("--run-liveness", action="store_true",
+                   help="run the liveness stage (httpx) over the RESOLVED hosts "
+                        "(first stage that sends HTTP to targets)")
     p.add_argument("--dry-run", action="store_true",
-                   help="with --run-passive: show the plan (seeds + commands), don't execute")
+                   help="with a --run-* stage: show the plan / input counts, don't execute")
     p.add_argument("--only", metavar="TOOL[,TOOL]",
                    help="with --run-passive: run only these passive tools "
                         "(e.g. --only subfinder); must be allowlisted passive tools")
+    p.add_argument("--limit-hosts", type=int, metavar="N",
+                   help="with --run-dns/--run-liveness: cap the input to the first N hosts "
+                        "(use --limit-hosts 1 for a single-host first live run)")
     p.add_argument("--tools", default="tools.yaml", metavar="FILE",
                    help="tool registry file (default: tools.yaml)")
     p.add_argument("--out", metavar="DIR",
-                   help="run-artifact dir (default: engagements/<slug>/runs/passive_recon/)")
+                   help="run-artifact dir (default: engagements/<slug>/runs/<stage>/)")
     return p
 
 
@@ -111,6 +119,63 @@ def _run_passive(scope, args) -> int:
     return 0
 
 
+def _run_active_stage(scope, args, *, stage_cls, stage_name: str) -> int:
+    """Shared plumbing for dns_resolve / liveness. Builds the stage on the real
+    GuardedRunner and runs it. Execution itself is a seam (``invoke_tool``) that
+    isn't wired yet, so a non-dry run surfaces a clear message instead of a
+    traceback until you implement it. ``--dry-run`` reports input counts offline."""
+    from .audit_log import AuditLog
+    from .config import load_tools
+    from .runner import GuardedRunner
+    from .store import Store
+
+    registry = load_tools(args.tools)
+    slug = _slug(scope.engagement.name)
+    eng_base = Path(args.engagements_dir) / slug
+    out = Path(args.out) if args.out else eng_base / "runs" / stage_name
+    audit = AuditLog(eng_base / "audit.jsonl", engagement=scope.engagement.name)
+    store = Store.open_for_engagement(scope.engagement.name, base_dir=args.engagements_dir)
+    runner = GuardedRunner(scope, registry, audit, force_safe_mode=args.safe_mode)
+    try:
+        stage = stage_cls(scope, registry, store, audit, runner, out)
+    except ValueError as e:
+        store.close()
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    limit = args.limit_hosts
+    n_in = len(stage.hosts_to_resolve(limit=limit) if stage_name == "dns_resolve"
+               else stage.hosts_to_probe(limit=limit))
+    cap = f" (limit {limit})" if limit else ""
+    print(f"\nRunning {stage_name} ({stage.TOOL}) on {n_in} host(s){cap}"
+          f"{' [DRY RUN]' if args.dry_run else ''} ...\n")
+    try:
+        result = stage.run(dry_run=args.dry_run, limit=limit)
+    except NotImplementedError:
+        store.close()
+        print(f"error: {stage_name} execution is not wired yet — "
+              f"{stage_cls.__name__}.invoke_tool is a seam.\n"
+              f"Wire it to self.runner.run(...) to enable live runs; "
+              f"--dry-run works now and reports the {n_in} input host(s).",
+              file=sys.stderr)
+        return 3
+    print(result.summary_text())
+    if not args.dry_run:
+        print(f"\nAudit log: {audit.path}\nDatabase : {store.path}")
+    store.close()
+    return 0
+
+
+def _run_dns(scope, args) -> int:
+    from .stages import DnsResolveStage
+    return _run_active_stage(scope, args, stage_cls=DnsResolveStage, stage_name="dns_resolve")
+
+
+def _run_liveness(scope, args) -> int:
+    from .stages import LivenessStage
+    return _run_active_stage(scope, args, stage_cls=LivenessStage, stage_name="liveness")
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -132,6 +197,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         _print_summary(scope, args.safe_mode)
         if args.run_passive:
             return _run_passive(scope, args)
+        if args.run_dns:
+            return _run_dns(scope, args)
+        if args.run_liveness:
+            return _run_liveness(scope, args)
         return 0
     except ReconPilotError as e:
         # Fail-closed: a bad/missing/malformed engagement is an error, not a

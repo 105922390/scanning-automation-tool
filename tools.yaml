@@ -89,7 +89,11 @@ tools:
     input: targets_file
     output: hosts
     active: true
-    args: "-l {targets_file} -silent -sc -title -tech-detect -rl {rps} -o {output}"
+    # -json: one JSON object per line (parsed by liveness.parse_httpx_jsonl)
+    # NO -fr: redirects are NOT followed (scope safety). The liveness stage reads
+    #         the Location header and applies filter_on_redirect() to the redirect
+    #         TARGET host, dropping out-of-scope targets without ever requesting them.
+    args: "-l {targets_file} -silent -json -sc -title -tech-detect -rl {rps} -o {output}"
     ua_arg: "-H 'User-Agent: {user_agent}'"
     install: "go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest"
 

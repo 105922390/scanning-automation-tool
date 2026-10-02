@@ -138,3 +138,30 @@ def test_amazon_vrp_passive_tool_unaffected_by_missing_ua(tmp_path):
     res = _real_runner(scope, tmp_path).run(
         "subfinder", ["amazon.com"], tmp_path / "o", dry_run=True)
     assert not res.skipped_reason and res.invocations
+
+
+# --------------------------------------------------------------------------- #
+# redirect-target extraction + filter on the TARGET host (no-follow model)
+# --------------------------------------------------------------------------- #
+def test_redirect_target_host_reads_location_only():
+    from reconpilot.http_policy import redirect_target_host
+    # url/input are the PROBED host, never the target
+    assert redirect_target_host(
+        {"input": "a.acme.com", "url": "https://a.acme.com",
+         "location": "https://x.aws.amazon.com/y"}) == "x.aws.amazon.com"
+    assert redirect_target_host({"url": "https://a.acme.com"}) == ""   # no redirect
+    assert redirect_target_host(
+        {"location": "/relative/path"}) == ""                         # relative = same host
+
+
+def test_filter_on_redirect_targets_the_location_not_the_probed_url():
+    from reconpilot.http_policy import redirect_target_host
+    recs = [
+        {"input": "a.acme.com", "url": "https://a.acme.com", "location": "https://y.aws.amazon.com/"},
+        {"input": "b.acme.com", "url": "https://b.aws.amazon.com"},   # probed url only, no Location
+    ]
+    kept, dropped = filter_on_redirect(recs, ("*.aws.amazon.com",),
+                                       host_of=redirect_target_host)
+    # only the Location-bearing record is dropped; the probed-url one is kept
+    assert [r["input"] for r in dropped] == ["a.acme.com"]
+    assert [r["input"] for r in kept] == ["b.acme.com"]

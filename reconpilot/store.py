@@ -290,6 +290,28 @@ class Store:
         q += " ORDER BY kind, key"
         return self._rows(q, args)
 
+    # -- attribute queries (resolution / liveness flags live in attrs JSON) -- #
+    def keys(self, kind: str, limit: Optional[int] = None) -> list[str]:
+        """All asset keys of a kind (e.g. every in-scope subdomain), sorted."""
+        q = "SELECT key FROM assets WHERE kind=? ORDER BY key"
+        args: list = [kind]
+        if limit is not None:
+            q += " LIMIT ?"; args.append(limit)
+        with self._lock:
+            return [r["key"] for r in self._conn.execute(q, args).fetchall()]
+
+    def keys_where_flag(self, kind: str, flag: str, value: bool = True,
+                        limit: Optional[int] = None) -> list[str]:
+        """Keys whose attrs JSON has boolean ``flag`` set to ``value``. Used to
+        pass only resolved hosts to liveness without loading every attrs blob."""
+        q = ("SELECT key FROM assets WHERE kind=? "
+             "AND json_extract(attrs, '$.' || ?) = ? ORDER BY key")
+        args: list = [kind, flag, 1 if value else 0]
+        if limit is not None:
+            q += " LIMIT ?"; args.append(limit)
+        with self._lock:
+            return [r["key"] for r in self._conn.execute(q, args).fetchall()]
+
     def new_findings_in_run(self, run_id: int) -> list[dict]:
         return self._rows(
             "SELECT * FROM findings WHERE first_seen_run=? "

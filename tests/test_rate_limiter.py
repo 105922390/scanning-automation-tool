@@ -1,5 +1,6 @@
 """Deterministic rate-limiter tests using an injected, hand-advanced clock."""
 
+import time
 import pytest
 
 from reconpilot.config import Limits
@@ -104,3 +105,64 @@ def test_concurrency_slot_limits_parallelism():
     assert rl._sema.acquire(blocking=False) is True
     rl._sema.release()
     s2.__exit__()
+
+
+# --------------------------------------------------------------------------- #
+# concurrency: the global slot cap holds under real parallel probes
+# --------------------------------------------------------------------------- #
+def test_concurrency_slot_caps_parallel_probes():
+    import threading
+
+    rl = RateLimiter(_limits(1000, 4))          # cap 4 concurrent workers
+    peak = 0
+    cur = 0
+    lock = threading.Lock()
+    start = threading.Barrier(12)
+
+    def worker():
+        nonlocal peak, cur
+        start.wait()
+        for _ in range(20):
+            with rl.concurrency_slot():
+                with lock:
+                    cur += 1
+                    peak = max(peak, cur)
+                time.sleep(0.001)
+                with lock:
+                    cur -= 1
+
+    threads = [threading.Thread(target=worker) for _ in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert peak <= 4                            # never exceeded the global cap
+    assert peak >= 2                            # and real parallelism happened
+
+
+def test_per_host_rate_holds_under_concurrent_acquire():
+    """Many threads hammering one host can't exceed the per-host token budget
+    within a fixed window (burst capacity + rate*window)."""
+    import threading
+
+    clk = FakeClock()
+    rl = RateLimiter(_limits(5, 50), clock=clk)   # 5 rps/host, capacity ~5
+    taken = 0
+    lock = threading.Lock()
+    start = threading.Barrier(10)
+
+    def worker():
+        nonlocal taken
+        start.wait()
+        for _ in range(50):
+            if rl.try_acquire("one.acme.com"):   # non-blocking; clock is frozen
+                with lock:
+                    taken += 1
+
+    threads = [threading.Thread(target=worker) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    # clock never advanced -> only the initial burst (capacity) could be taken
+    assert taken == 5
