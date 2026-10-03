@@ -13,12 +13,13 @@ from pathlib import Path
 
 from .. import orchestrate
 from ..engagement import load_engagement
-from ..stages import DnsResolveStage, LivenessStage, PassiveReconStage
+from ..stages import DnsResolveStage, LivenessStage, NucleiStage, PassiveReconStage
 
 _STAGE_CLASSES = {
     "passive_recon": PassiveReconStage,
     "dns_resolve": DnsResolveStage,
     "liveness": LivenessStage,
+    "signal_scan": NucleiStage,
 }
 
 

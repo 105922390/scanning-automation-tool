@@ -53,9 +53,13 @@ _STAGE_KEYWORDS = {
     "passive_recon": ["passive", "subdomain", "enumerat", "subfinder", "amass", "recon"],
     "dns_resolve": ["resolve", "resolution", "dns", "dnsx"],
     "liveness": ["live", "alive", "probe", "httpx", "http status", "status code", "http probe"],
+    "signal_scan": ["nuclei", "signal", "vuln", "vulnerab", "template", "cve"],
 }
-# stage -> (sends traffic to target?, how to name its tools)
-_STAGE_TRAFFIC = {"passive_recon": False, "dns_resolve": False, "liveness": True}
+# stage -> sends traffic to the target host?
+_STAGE_TRAFFIC = {"passive_recon": False, "dns_resolve": False, "liveness": True,
+                  "signal_scan": True}
+# stages that accept a single --host (they hit the target per host)
+_HOST_CAPABLE = ("liveness", "signal_scan")
 
 _HOST_RE = re.compile(r"\b([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+)\b",
                       re.IGNORECASE)
@@ -111,16 +115,22 @@ class KeywordInterpreter:
         limit = _extract_limit(low)
         matched = [s for s, kws in _STAGE_KEYWORDS.items() if any(k in low for k in kws)]
 
-        # A specific host is only meaningful for liveness (CLI --host is liveness-only).
+        # A specific host is only meaningful for host-capable stages (liveness /
+        # signal_scan); CLI/web --host targets exactly one host.
         if host:
-            others = [s for s in matched if s != "liveness"]
+            others = [s for s in matched if s not in _HOST_CAPABLE]
             if others:
                 return Intent(needs_clarification=True,
-                              message=f"A specific host ({host}) can only be probed by the "
-                                      f"liveness stage, but the prompt also asks for "
-                                      f"{', '.join(others)}. Rephrase to one stage.")
-            params = {"host": host}
-            return Intent(stage="liveness", params=params)
+                              message=f"A specific host ({host}) can only be used by the "
+                                      f"liveness or signal_scan stage, but the prompt also "
+                                      f"asks for {', '.join(others)}. Rephrase to one stage.")
+            hostcap = [s for s in matched if s in _HOST_CAPABLE]
+            if len(hostcap) > 1:
+                return Intent(needs_clarification=True,
+                              message=f"Ambiguous: a host ({host}) with both "
+                                      f"{', '.join(sorted(hostcap))}. Ask for one stage.")
+            stage = hostcap[0] if hostcap else "liveness"   # default to liveness
+            return Intent(stage=stage, params={"host": host})
 
         if not matched:
             return Intent(needs_clarification=True,
@@ -163,6 +173,8 @@ def _stage_tools(scope, stage: str) -> list[str]:
         return [t for t in ("dnsx",) if t in scope.allowed_tools]
     if stage == "liveness":
         return [t for t in ("httpx",) if t in scope.allowed_tools]
+    if stage == "signal_scan":
+        return [t for t in ("nuclei",) if t in scope.allowed_tools]
     # passive_recon: passive subdomain tools (subfinder/amass), as the stage selects
     return sorted(t for t in ("subfinder", "amass") if t in scope.allowed_tools)
 
@@ -174,6 +186,8 @@ def _host_estimate(scope, store: Store, stage: str, params: dict) -> int:
         n = len(enumeration_seeds(scope))
     elif stage == "dns_resolve":
         n = store.count_assets("subdomain")
+    elif stage == "signal_scan":        # live hosts not yet signal-scanned
+        n = store.count_assets("subdomain", flag_true="live", flag_absent="signal_scanned_at_run")
     else:  # liveness: resolved hosts not yet probed
         n = store.count_assets("subdomain", flag_true="resolves", flag_absent="probed_at_run")
     limit = params.get("limit")

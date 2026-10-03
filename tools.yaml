@@ -156,7 +156,8 @@ tools:
     output: findings
     active: true
     # Default to lower-noise template groups; expand via the GUI prompt.
-    args: "-l {targets_file} -silent -rl {rps} -c {concurrency} -t {templates} -jsonl -o {output}"
+    # -nc: no ANSI color in output (parse_nuclei_jsonl also strips color defensively).
+    args: "-l {targets_file} -silent -nc -rl {rps} -c {concurrency} -t {templates} -jsonl -o {output}"
     templates_default: "cves/,misconfiguration/,exposures/,default-logins/"
     ua_arg: "-H 'User-Agent: {user_agent}'"
     no_oob_arg: "-no-interactsh"   # disable projectdiscovery's public interactsh (third-party OOB)

@@ -82,7 +82,7 @@ def engdir(tmp_path):
         "in_scope:\n  domains: [demo.com, '*.demo.com']\n"
         "limits:\n  max_rps_per_host: 5\n  max_global_concurrency: 5\n"
         "  max_requests_per_run: 50000\n  safe_mode: true\n"
-        "allowed_tools: [subfinder, amass, dnsx, httpx]\n")
+        "allowed_tools: [subfinder, amass, dnsx, httpx, nuclei]\n")
     store = Store.open_for_engagement("demo", base_dir=d)
     rid = store.start_run("passive_recon")
     store.upsert_asset("subdomain", "www.demo.com", rid,
@@ -150,3 +150,32 @@ def test_plan_unknown_engagement_raises(engdir):
 def test_plan_unknown_engagement_blocks_traversal(engdir):
     with pytest.raises(UnknownEngagement):
         plan(engdir, "../../etc/passwd", "probe live hosts")
+
+
+# --------------------------------------------------------------------------- #
+# signal_scan (nuclei) planning
+# --------------------------------------------------------------------------- #
+def test_interpret_signal_scan():
+    for p in ("run nuclei", "scan for vulnerabilities", "cve templates", "signal scan"):
+        it = I.interpret(p)
+        assert it.stage == "signal_scan", p
+
+
+def test_interpret_nuclei_single_host():
+    it = I.interpret("nuclei scan www.amazon.com")
+    assert it.stage == "signal_scan" and it.params == {"host": "www.amazon.com"}
+
+
+def test_plan_signal_scan_preview(engdir):
+    # mark a live host so the estimate is meaningful; needs nuclei allowlisted
+    import dataclasses
+    from reconpilot.store import Store as _S
+    s = _S.open_for_engagement("demo", base_dir=engdir)
+    s.upsert_asset("subdomain", "www.demo.com", s.start_run("liveness"),
+                   attrs={"resolves": True, "live": True})
+    s.close()
+    p = plan(engdir, "demo", "run nuclei")
+    assert p.ok and p.stage == "signal_scan"
+    assert p.preview["tools"] == ["nuclei"]
+    assert p.preview["sends_traffic"] is True
+    assert p.preview["hosts"] == 1
