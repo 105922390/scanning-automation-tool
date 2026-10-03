@@ -158,25 +158,8 @@ class NucleiStage:
 
     # -- execution seam (wire this to the real runner) ----------------------- #
     def invoke_tool(self, hosts: list[str], out_dir: Path):
-        """SEAM — left unimplemented on purpose (plumbing only). Wire it to the
-        EXISTING GuardedRunner so nuclei inherits every guard already proven by
-        tests: engagement User-Agent injection, ``-no-interactsh`` (no third-party
-        OOB) via the http policy, the per-host rate limiter + concurrency cap +
-        circuit breaker, and the scope gate on every target.
-
-        nuclei is a batch (``-l {targets_file}``) tool, so one call handles the
-        chunk and the runner writes the input file. Return the invocations (objects
-        exposing ``.output_path``, ``.exit_code`` and ``.timed_out``). The run()
-        orchestration below is complete and tested with a fake executor:
-
-            # TODO(you): execute nuclei via the guarded runner (active, UA-gated,
-            #            interactsh disabled); identical to Liveness.invoke_tool
-            # res = self.runner.run(self.TOOL, hosts, out_dir)   # batch mode, not seed
-            # return res.invocations
-        """
-        raise NotImplementedError(
-            "NucleiStage.invoke_tool is a seam; wire it to self.runner.run "
-            "or pass executor=... to run(). See the docstring.")
+        res = self.runner.run(self.TOOL, hosts, out_dir)
+        return res.invocations
 
     # -- orchestration ------------------------------------------------------- #
     def run(self, dry_run: bool = False,
