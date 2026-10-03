@@ -16,7 +16,9 @@
 block_cipher = None
 
 a = Analysis(
-    ['reconpilot/desktop.py'],
+    # entry is the root-level wrapper (NOT reconpilot/desktop.py directly) so the
+    # package is imported with context and its relative imports resolve.
+    ['run_desktop.py'],
     pathex=[],
     binaries=[],
     # bundle the web UI's static files so app.py can serve index.html from the exe

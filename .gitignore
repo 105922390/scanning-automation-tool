@@ -12,3 +12,8 @@ engagements/*/recon.sqlite*
 engagements/*/*.jsonl
 engagements/*/logs/
 engagements/*/runs/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak

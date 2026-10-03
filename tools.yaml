@@ -13,7 +13,7 @@
 #   {rps}           per-host rate derived from scope.yaml limits
 #   {concurrency}   worker count derived from scope.yaml limits
 #   {wordlist}      path to the active wordlist (for fuzzers)
-#   {templates}     nuclei templates dir/selector
+#   {templates}     nuclei template selector (tags, e.g. "cve,misconfig")
 #
 # stage:   which pipeline stage this belongs to
 # input:   what the runner feeds it (domain | targets_file | urls_file | hosts_file)
@@ -157,8 +157,10 @@ tools:
     active: true
     # Default to lower-noise template groups; expand via the GUI prompt.
     # -nc: no ANSI color in output (parse_nuclei_jsonl also strips color defensively).
-    args: "-l {targets_file} -silent -nc -rl {rps} -c {concurrency} -t {templates} -jsonl -o {output}"
-    templates_default: "cves/,misconfiguration/,exposures/,default-logins/"
+    # Select templates by TAG, not directory path: nuclei-templates v10 nests
+    # categories, so the old -t cves/,misconfiguration/,… paths load 0 templates.
+    args: "-l {targets_file} -silent -nc -rl {rps} -c {concurrency} -tags {templates} -jsonl -o {output}"
+    templates_default: "cve,misconfig,exposure,default-login"
     ua_arg: "-H 'User-Agent: {user_agent}'"
     no_oob_arg: "-no-interactsh"   # disable projectdiscovery's public interactsh (third-party OOB)
     install: "go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"

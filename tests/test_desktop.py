@@ -87,3 +87,16 @@ def test_stop_cancels_running_jobs(engdir):
         assert job.wait(3) and job.status == "cancelled"
     finally:
         server.stop()
+
+
+def test_default_base_dir_not_frozen():
+    import reconpilot.desktop as d
+    assert d._default_base_dir() == "engagements"      # cwd-relative when not frozen
+
+
+def test_default_base_dir_frozen(monkeypatch, tmp_path):
+    import reconpilot.desktop as d
+    fake_exe = tmp_path / "ReconPilot.exe"
+    monkeypatch.setattr(d.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(d.sys, "executable", str(fake_exe))
+    assert d._default_base_dir() == str(tmp_path / "engagements")   # next to the exe
