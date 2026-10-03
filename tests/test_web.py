@@ -200,3 +200,65 @@ def test_localhost_hosts_pass_and_api_is_no_store(tmp_path):
         res = asyncio.run(_asgi_get(app, "/api/engagements", host))
         assert res["status"] == 200, host
         assert res["headers"].get("cache-control") == "no-store"
+
+
+# --------------------------------------------------------------------------- #
+# POST /api/plan endpoint (raw ASGI, no httpx)
+# --------------------------------------------------------------------------- #
+async def _asgi_post(app, path, body_obj, host="127.0.0.1:8000"):
+    import json as _json
+    raw = _json.dumps(body_obj).encode()
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+             "method": "POST", "path": path, "raw_path": path.encode(),
+             "query_string": b"", "scheme": "http", "root_path": "",
+             "headers": [(b"host", host.encode()), (b"content-type", b"application/json"),
+                         (b"content-length", str(len(raw)).encode())],
+             "client": ("127.0.0.1", 50000), "server": ("127.0.0.1", 8000)}
+    out = {}
+    body = bytearray()
+
+    async def receive():
+        return {"type": "http.request", "body": raw, "more_body": False}
+
+    async def send(msg):
+        if msg["type"] == "http.response.start":
+            out["status"] = msg["status"]
+        elif msg["type"] == "http.response.body":
+            body.extend(msg.get("body", b""))
+
+    await app(scope, receive, send)
+    out["json"] = __import__("json").loads(bytes(body) or b"null")
+    return out
+
+
+def test_plan_endpoint_returns_preview(engdir):
+    app = create_app(base_dir=engdir)
+    res = asyncio.run(_asgi_post(app, "/api/plan",
+                                 {"prompt": "probe live hosts", "engagement": "demo"}))
+    assert res["status"] == 200
+    p = res["json"]
+    assert p["ok"] is True and p["stage"] == "liveness"
+    assert p["preview"]["sends_traffic"] is True and p["preview"]["tools"] == ["httpx"]
+
+
+def test_plan_endpoint_clarifies(engdir):
+    app = create_app(base_dir=engdir)
+    res = asyncio.run(_asgi_post(app, "/api/plan",
+                                 {"prompt": "do the thing", "engagement": "demo"}))
+    assert res["status"] == 200
+    assert res["json"]["ok"] is False and res["json"]["needs_clarification"] is True
+
+
+def test_plan_endpoint_unknown_engagement_404(engdir):
+    app = create_app(base_dir=engdir)
+    res = asyncio.run(_asgi_post(app, "/api/plan",
+                                 {"prompt": "probe live hosts", "engagement": "nope"}))
+    assert res["status"] == 404
+
+
+def test_plan_endpoint_rejects_foreign_host(engdir):
+    app = create_app(base_dir=engdir)
+    res = asyncio.run(_asgi_post(app, "/api/plan",
+                                 {"prompt": "probe live hosts", "engagement": "demo"},
+                                 host="attacker.com"))
+    assert res["status"] == 403

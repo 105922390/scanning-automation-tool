@@ -12,9 +12,22 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
 
 from ..engagement import DEFAULT_DIR
-from . import service
+from . import planner, service
+from .jobs import JobManager, job_log
+from .run_exec import execute_plan
+
+
+class PlanRequest(BaseModel):
+    prompt: str
+    engagement: str
+
+
+class RunRequest(BaseModel):
+    plan: dict                 # must carry engagement, stage, params (from /api/plan)
+    confirm_token: str
 
 _STATIC = Path(__file__).parent / "static"
 
@@ -45,8 +58,11 @@ def host_is_allowed(host_header: str, allowed=ALLOWED_HOSTS) -> bool:
     return _host_only(host_header) in allowed
 
 
-def create_app(base_dir: str | Path = DEFAULT_DIR, allowed_hosts=ALLOWED_HOSTS) -> FastAPI:
+def create_app(base_dir: str | Path = DEFAULT_DIR, allowed_hosts=ALLOWED_HOSTS,
+               executor=None) -> FastAPI:
     app = FastAPI(title="ReconPilot", docs_url=None, redoc_url=None)
+    # executor drives the real stages (a seam) in prod; tests inject a fake one.
+    jobs = JobManager(executor or (lambda plan: execute_plan(plan, base_dir)))
 
     @app.middleware("http")
     async def _guard_host_and_cache(request, call_next):
@@ -89,6 +105,45 @@ def create_app(base_dir: str | Path = DEFAULT_DIR, allowed_hosts=ALLOWED_HOSTS) 
     @app.get("/api/engagements/{name}/redirect-events")
     def redirect_events(name: str, limit: int = Query(200, ge=1, le=2000)):
         return _guard(lambda: service.redirect_events(base_dir, name, limit=limit))
+
+    @app.post("/api/plan")
+    def make_plan(req: PlanRequest):
+        # Prompt -> structured plan preview + confirm_token. NO execution here.
+        return _guard(lambda: planner.plan(base_dir, req.engagement, req.prompt).to_dict())
+
+    @app.post("/api/run")
+    def start_run(req: RunRequest):
+        p = req.plan or {}
+        engagement, stage = p.get("engagement"), p.get("stage")
+        params = p.get("params") or {}
+        # 1. confirm enforcement: the token must match THIS plan core (prevents a
+        #    single-request run and detects client tampering of the plan).
+        core = planner.plan_core(engagement, stage, params)
+        if not planner.verify_token(core, req.confirm_token):
+            raise HTTPException(status_code=403,
+                                detail="run not confirmed: missing or invalid confirm_token")
+        # 2. re-validate server-side — never trust the client's plan/preview.
+        validated = _guard(lambda: planner.build_plan(base_dir, engagement, stage, params))
+        if not validated.ok:
+            raise HTTPException(status_code=400,
+                                detail=validated.message or "plan failed server-side validation")
+        job = jobs.submit(validated.engagement, validated.stage, validated.params)
+        return {"run_id": job.id, "status": job.status,
+                "engagement": job.engagement, "stage": job.stage}
+
+    @app.get("/api/runs/{run_id}/status")
+    def run_status(run_id: str):
+        job = jobs.get(run_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="unknown run")
+        return job.to_status()
+
+    @app.get("/api/runs/{run_id}/log")
+    def run_log(run_id: str, offset: int = Query(0, ge=0)):
+        job = jobs.get(run_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="unknown run")
+        return job_log(base_dir, job, offset=offset)
 
     @app.get("/")
     def index():

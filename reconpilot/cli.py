@@ -8,14 +8,15 @@ execution and the API/GUI are wired in later build steps; this establishes the
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from . import orchestrate
 from .engagement import DEFAULT_DIR, list_engagements, load_engagement
 from .errors import ReconPilotError
+from .orchestrate import _slug
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -84,8 +85,6 @@ def _print_summary(scope, force_safe_mode: bool) -> None:
               f"drop-on-redirect {len(http.drop_on_redirect_to)}")
 
 
-def _slug(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]", "_", name)
 
 
 def _run_passive(scope, args) -> int:
@@ -123,61 +122,37 @@ def _run_passive(scope, args) -> int:
 
 
 def _run_active_stage(scope, args, *, stage_cls, stage_name: str) -> int:
-    """Shared plumbing for dns_resolve / liveness. Builds the stage on the real
-    GuardedRunner and runs it. Execution itself is a seam (``invoke_tool``) that
-    isn't wired yet, so a non-dry run surfaces a clear message instead of a
-    traceback until you implement it. ``--dry-run`` reports input counts offline."""
-    from .audit_log import AuditLog
-    from .config import load_tools
-    from .runner import GuardedRunner
-    from .store import Store
-
-    registry = load_tools(args.tools)
-    slug = _slug(scope.engagement.name)
-    eng_base = Path(args.engagements_dir) / slug
-    out = Path(args.out) if args.out else eng_base / "runs" / stage_name
-    audit = AuditLog(eng_base / "audit.jsonl", engagement=scope.engagement.name)
-    store = Store.open_for_engagement(scope.engagement.name, base_dir=args.engagements_dir)
-    runner = GuardedRunner(scope, registry, audit, force_safe_mode=args.safe_mode)
-    try:
-        stage = stage_cls(scope, registry, store, audit, runner, out)
-    except ValueError as e:
-        store.close()
-        print(f"error: {e}", file=sys.stderr)
-        return 2
-
+    """Shared plumbing for dns_resolve / liveness. Delegates stage construction and
+    execution to ``orchestrate.run_stage`` (one construction path shared with the
+    web run layer), then handles the CLI presentation."""
     limit = args.limit_hosts
+    cap = f" (limit {limit})" if limit else ""
     # --host (liveness only): probe exactly one host, bypassing DB selection. Still
-    # scope-gated here for a clean message (and again by the runner), and run
-    # through the same GuardedRunner path (UA / rate / redirect filter).
+    # scope-gated here for a clean message (and again by the runner).
     single = getattr(args, "host", None) if stage_name == "liveness" else None
-    run_kwargs = {"dry_run": args.dry_run, "limit": limit}
+    hosts = None
     if single:
         from .scope_guard import ScopeGuard
         dec = ScopeGuard(scope).check(single)
         if not dec.allowed:
-            store.close()
             print(f"error: host {single!r} is out of scope: {dec.reason}", file=sys.stderr)
             return 2
-        run_kwargs["hosts"] = [single]
-        n_in = 1
+        hosts = [dec.host]
         cap = f" [--host {dec.host}]"
-    else:
-        n_in = len(stage.hosts_to_resolve(limit=limit) if stage_name == "dns_resolve"
-                   else stage.hosts_to_probe(limit=limit))
-        cap = f" (limit {limit})" if limit else ""
-    print(f"\nRunning {stage_name} ({stage.TOOL}) on {n_in} host(s){cap}"
-          f"{' [DRY RUN]' if args.dry_run else ''} ...\n")
+
     try:
-        result = stage.run(**run_kwargs)
-    except NotImplementedError:
-        store.close()
-        print(f"error: {stage_name} execution is not wired yet — "
-              f"{stage_cls.__name__}.invoke_tool is a seam.\n"
-              f"Wire it to self.runner.run(...) to enable live runs; "
-              f"--dry-run works now and reports the {n_in} input host(s).",
-              file=sys.stderr)
-        return 3
+        sr = orchestrate.run_stage(scope, stage_cls, stage_name, base_dir=args.engagements_dir,
+                                   tools=args.tools, out=(Path(args.out) if args.out else None),
+                                   force_safe_mode=args.safe_mode, dry_run=args.dry_run,
+                                   limit=limit, hosts=hosts)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    result, store, audit = sr.result, sr.store, sr.audit
+    n_in = result.input_hosts if stage_name == "dns_resolve" else result.probed
+    print(f"\nRunning {stage_name} ({sr.stage.TOOL}) on {n_in} host(s){cap}"
+          f"{' [DRY RUN]' if args.dry_run else ''} ...\n")
     print(result.summary_text())
     if not args.dry_run:
         print(f"\nAudit log: {audit.path}\nDatabase : {store.path}")

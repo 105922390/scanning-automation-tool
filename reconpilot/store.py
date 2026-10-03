@@ -128,11 +128,21 @@ class Store:
             self._conn.execute("PRAGMA journal_mode = WAL")
         self._init_schema()
 
+    @staticmethod
+    def engagement_slug(engagement_name: str) -> str:
+        return "".join(c if c.isalnum() or c in "-_" else "_" for c in engagement_name)
+
+    @classmethod
+    def engagement_db_path(cls, engagement_name: str,
+                           base_dir: str | Path = "engagements") -> Path:
+        """The engagement's recon.sqlite path WITHOUT opening it — lets callers
+        resolve the sibling audit.jsonl without a DB side effect."""
+        return Path(base_dir) / cls.engagement_slug(engagement_name) / "recon.sqlite"
+
     @classmethod
     def open_for_engagement(cls, engagement_name: str, base_dir: str | Path = "engagements",
                             **kw) -> "Store":
-        slug = "".join(c if c.isalnum() or c in "-_" else "_" for c in engagement_name)
-        return cls(Path(base_dir) / slug / "recon.sqlite", **kw)
+        return cls(cls.engagement_db_path(engagement_name, base_dir), **kw)
 
     def _init_schema(self) -> None:
         with self._lock:
@@ -376,7 +386,7 @@ class Store:
         "status_asc": "CAST(json_extract(attrs, '$.status_code') AS INTEGER) ASC, key",
     }
 
-    def _asset_filter_sql(self, kind, search, flag_true, flag_present):
+    def _asset_filter_sql(self, kind, search, flag_true, flag_present, flag_absent=None):
         q = " WHERE 1=1"
         args: list = []
         if kind:
@@ -387,6 +397,8 @@ class Store:
             q += " AND json_extract(attrs, '$.' || ?) = 1"; args.append(flag_true)
         if flag_present:
             q += " AND json_extract(attrs, '$.' || ?) IS NOT NULL"; args.append(flag_present)
+        if flag_absent:
+            q += " AND json_extract(attrs, '$.' || ?) IS NULL"; args.append(flag_absent)
         return q, args
 
     def list_assets(self, kind: Optional[str] = None, search: Optional[str] = None,
@@ -403,11 +415,12 @@ class Store:
         return rows
 
     def count_assets(self, kind: Optional[str] = None, search: Optional[str] = None,
-                     flag_true: Optional[str] = None,
-                     flag_present: Optional[str] = None) -> int:
+                     flag_true: Optional[str] = None, flag_present: Optional[str] = None,
+                     flag_absent: Optional[str] = None) -> int:
         """Count assets matching the same filters as :meth:`list_assets` (for
-        pagination totals and the dashboard stat tiles)."""
-        where, args = self._asset_filter_sql(kind, search, flag_true, flag_present)
+        pagination totals, stat tiles, and plan host estimates). ``flag_absent``
+        counts rows where that attr is unset — e.g. resolved-but-not-yet-probed."""
+        where, args = self._asset_filter_sql(kind, search, flag_true, flag_present, flag_absent)
         with self._lock:
             return self._conn.execute(f"SELECT COUNT(*) n FROM assets{where}", args).fetchone()["n"]
 

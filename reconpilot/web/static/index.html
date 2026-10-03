@@ -60,6 +60,27 @@
 </header>
 
 <main>
+  <section id="planner" style="margin-bottom:20px;">
+    <div class="toolbar">
+      <input type="text" id="prompt" style="flex:1; min-width:260px;"
+             placeholder="Describe a run, e.g. 'probe live hosts', 'resolve DNS', 'probe www.amazon.com'">
+      <button id="planBtn">Plan</button>
+    </div>
+    <div id="planPanel" class="stat" style="display:none; width:100%;">
+      <div id="planBody"></div>
+      <div id="planActions" class="toolbar" style="margin-top:10px; display:none;">
+        <button id="confirmBtn" style="border-color:var(--ok); color:var(--ok);">Confirm &amp; run</button>
+        <button id="cancelBtn">Cancel</button>
+      </div>
+    </div>
+    <div id="runPanel" class="stat" style="display:none; width:100%; margin-top:12px;">
+      <div id="runHead"></div>
+      <pre id="runLog" style="max-height:280px; overflow:auto; background:#0d1117;
+           border:1px solid var(--line); border-radius:6px; padding:10px; font-size:12px;
+           white-space:pre-wrap; margin:10px 0 0;"></pre>
+    </div>
+  </section>
+
   <div class="stats" id="stats"></div>
 
   <div class="tabs toolbar">
@@ -203,6 +224,87 @@ document.querySelectorAll(".tabs button").forEach(b => b.addEventListener("click
   document.querySelectorAll(".seg").forEach(s=>s.classList.remove("active"));
   $("#seg-"+b.dataset.seg).classList.add("active");
 }));
+
+// prompt-to-plan (phase 2a: preview only, no execution)
+let currentPlan = null;
+async function makePlan() {
+  const prompt = $("#prompt").value.trim();
+  if (!prompt || !state.eng) return;
+  const panel = $("#planPanel"), body = $("#planBody"), actions = $("#planActions");
+  panel.style.display = "block";
+  try {
+    const r = await fetch("/api/plan", {
+      method:"POST", headers:{"content-type":"application/json"},
+      body: JSON.stringify({ prompt, engagement: state.eng }) });
+    const p = await r.json();
+    if (!r.ok) { body.innerHTML = `<span class="pill bad">error</span> ${esc(p.detail||r.status)}`;
+                 actions.style.display="none"; currentPlan=null; return; }
+    currentPlan = p;
+    if (!p.ok) {
+      const tag = p.needs_clarification ? "clarify" : "blocked";
+      body.innerHTML = `<span class="pill muted">${tag}</span> ${esc(p.message)}`;
+      actions.style.display = "none";
+      return;
+    }
+    const v = p.preview;
+    const traffic = v.sends_traffic
+      ? `<span class="pill bad">sends traffic to target</span>`
+      : `<span class="pill ok">no target traffic</span>`;
+    body.innerHTML = `
+      <div style="font-size:15px; margin-bottom:8px;"><b>${esc(v.stage)}</b> on <b>${esc(v.engagement)}</b> ${traffic}</div>
+      <table style="width:auto;">
+        <tr><th>Hosts it would touch</th><td>${Number(v.hosts).toLocaleString()}${p.params.host?` (<code>${esc(p.params.host)}</code>)`:""}</td></tr>
+        <tr><th>Rate cap</th><td>${esc(v.rate_cap)}</td></tr>
+        <tr><th>Tools</th><td>${esc((v.tools||[]).join(", "))}</td></tr>
+        ${p.params.limit?`<tr><th>Limit</th><td>${p.params.limit}</td></tr>`:""}
+      </table>`;
+    actions.style.display = "flex";
+  } catch (x) { body.innerHTML = `<span class="pill bad">error</span> ${esc(x.message)}`;
+                actions.style.display="none"; }
+}
+$("#planBtn").addEventListener("click", () => makePlan().catch(x=>setErr(x.message)));
+$("#prompt").addEventListener("keydown", e => { if (e.key==="Enter") $("#planBtn").click(); });
+$("#cancelBtn").addEventListener("click", () => { $("#planPanel").style.display="none"; currentPlan=null; });
+let logTimer = null;
+function statusPill(s){
+  const cls = s==="completed"?"ok":(s==="running"?"muted":"bad");
+  return `<span class="pill ${cls}">${esc(s)}</span>`;
+}
+async function pollRun(runId){
+  let offset = 0;
+  const head = $("#runHead"), log = $("#runLog");
+  async function tick(){
+    try {
+      const st = await api(`/api/runs/${runId}/status`);
+      head.innerHTML = `Run <code>${esc(runId.slice(0,8))}</code> · ${statusPill(st.status)}`
+        + (st.error ? ` <span class="muted">${esc(st.error)}</span>` : "");
+      const lg = await api(`/api/runs/${runId}/log?offset=${offset}`);
+      if (lg.events.length){
+        log.textContent += lg.events.map(e =>
+          `${(e.ts||"").slice(11,19)}  ${e.event||""}  ${e.tool||e.stage||""} ${e.root||e.target||e.host||""}`.trimEnd()
+        ).join("\n") + "\n";
+        offset = lg.next_offset; log.scrollTop = log.scrollHeight;
+      }
+      if (st.done){ clearInterval(logTimer); logTimer=null; }
+    } catch(x){ clearInterval(logTimer); logTimer=null; setErr(x.message); }
+  }
+  clearInterval(logTimer); await tick(); logTimer = setInterval(tick, 1500);
+}
+$("#confirmBtn").addEventListener("click", async () => {
+  if (!currentPlan || !currentPlan.ok) return;
+  $("#planActions").style.display = "none";
+  $("#runPanel").style.display = "block";
+  $("#runLog").textContent = ""; $("#runHead").textContent = "Starting…";
+  try {
+    const r = await fetch("/api/run", { method:"POST",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({ plan: {engagement: currentPlan.engagement, stage: currentPlan.stage,
+                                    params: currentPlan.params}, confirm_token: currentPlan.confirm_token }) });
+    const d = await r.json();
+    if (!r.ok){ $("#runHead").innerHTML = `<span class="pill bad">rejected</span> ${esc(d.detail||r.status)}`; return; }
+    pollRun(d.run_id);
+  } catch(x){ $("#runHead").innerHTML = `<span class="pill bad">error</span> ${esc(x.message)}`; }
+});
 
 loadEngagements().catch(x => setErr(x.message));
 </script>
