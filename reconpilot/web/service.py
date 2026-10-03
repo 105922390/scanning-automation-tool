@@ -10,9 +10,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from .. import report
 from ..audit_log import AuditLog
-from ..engagement import list_engagements
+from ..engagement import list_engagements, load_engagement
 from ..store import Store
+
+# Triage states a user can set on a lead (free-text column, validated here).
+TRIAGE_STATES = ("new", "reviewing", "promising", "dismissed", "false-positive")
+_FINDING_SORTS = ("recent", "severity", "host")
 
 # Asset filters the UI exposes -> how the store should constrain the query.
 _FILTERS = {
@@ -102,6 +107,87 @@ def assets(base_dir: str | Path, name: str, *, filter: str = "all",
         "limit": limit, "offset": offset, "total": total,
         "rows": [_asset_row(r) for r in rows],
     }
+
+
+class UnknownFinding(LookupError):
+    """Requested finding id does not exist for this engagement."""
+
+
+def _finding_row(f: dict) -> dict:
+    a = f.get("attrs") or {}
+    return {
+        "id": f["id"],
+        "template_id": a.get("template_id") or "",
+        "name": f.get("name") or "",
+        "severity": f.get("severity") or "unknown",
+        "host": f.get("target") or "",
+        "matched_at": a.get("matched_at") or f.get("matched_at") or "",
+        "triage_status": f.get("triage_status") or "new",
+        "triage_note": f.get("triage_note") or "",
+        "lead": bool(a.get("lead")),
+        "label": a.get("label") or "",
+        "tool": f.get("tool") or "",
+    }
+
+
+def findings(base_dir: str | Path, name: str, *, severity: Optional[str] = None,
+             triage: Optional[str] = None, search: Optional[str] = None,
+             sort: str = "severity", limit: int = 100, offset: int = 0) -> dict:
+    if sort not in _FINDING_SORTS:
+        raise ValueError(f"unknown sort {sort!r}; choose from {list(_FINDING_SORTS)}")
+    if triage and triage not in TRIAGE_STATES:
+        raise ValueError(f"unknown triage state {triage!r}; choose from {list(TRIAGE_STATES)}")
+    limit = max(1, min(int(limit), 1000))
+    offset = max(0, int(offset))
+    store = _open(base_dir, name)
+    try:
+        rows = store.list_findings(severity=severity, triage_status=triage, search=search,
+                                   sort=sort, limit=limit, offset=offset)
+        total = store.count_findings(severity=severity, triage_status=triage, search=search)
+    finally:
+        store.close()
+    return {
+        "engagement": name, "severity": severity or "", "triage": triage or "",
+        "search": search or "", "sort": sort, "limit": limit, "offset": offset,
+        "total": total, "triage_states": list(TRIAGE_STATES),
+        "label": "leads — need manual PoC",
+        "rows": [_finding_row(f) for f in rows],
+    }
+
+
+def set_triage(base_dir: str | Path, name: str, finding_id: int, status: str) -> dict:
+    """Persist a triage state on a lead (a write to our OWN DB, not a scan)."""
+    if status not in TRIAGE_STATES:
+        raise ValueError(f"unknown triage state {status!r}; choose from {list(TRIAGE_STATES)}")
+    store = _open(base_dir, name)
+    try:
+        f = store.get_finding(finding_id)
+        if not f:
+            raise UnknownFinding(finding_id)
+        store.set_triage(finding_id, status, note=f.get("triage_note") or "")
+        return _finding_row(store.get_finding(finding_id))
+    finally:
+        store.close()
+
+
+def export_lead(base_dir: str | Path, name: str, finding_id: int) -> dict:
+    """Build a Markdown scaffold for one lead — observed fields + empty placeholders
+    only. No submission; no fabricated impact (see reconpilot.report)."""
+    store = _open(base_dir, name)
+    try:
+        f = store.get_finding(finding_id)
+    finally:
+        store.close()
+    if not f:
+        raise UnknownFinding(finding_id)
+    scope = load_engagement(name, base_dir)
+    audit = AuditLog(Store.engagement_db_path(name, base_dir).with_name("audit.jsonl"),
+                     engagement="").read_all()
+    md = report.lead_markdown(
+        f, engagement_name=name, program_url=scope.engagement.program_url,
+        command=report.nuclei_command(audit), audit_slice=report.audit_slice(audit))
+    return {"engagement": name, "finding_id": finding_id,
+            "filename": report.lead_filename(f), "markdown": md}
 
 
 def redirect_events(base_dir: str | Path, name: str, *, limit: int = 200) -> dict:

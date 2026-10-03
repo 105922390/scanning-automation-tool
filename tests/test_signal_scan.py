@@ -173,14 +173,17 @@ def test_hosts_to_scan_are_live_and_unscanned(sig_scope, registry, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# seam: unwired until implemented
+# wired default path: run() with NO executor goes through invoke_tool -> runner
+# (fake runner, so nothing real runs / no network)
 # --------------------------------------------------------------------------- #
-def test_seam_raises_until_wired(sig_scope, registry, tmp_path):
-    stage, store, _ = _stage(sig_scope, registry, tmp_path)
+def test_default_run_path_calls_runner_via_invoke_tool(sig_scope, registry, tmp_path):
+    runner = _ChunkRunner()
+    stage, store, _ = _stage(sig_scope, registry, tmp_path, runner=runner)
     store.upsert_asset("subdomain", "www.acme.com", store.start_run("liveness"),
                        attrs={"live": True})
-    with pytest.raises(NotImplementedError):
-        stage.run()           # no executor -> invoke_tool seam
+    res = stage.run()                               # no executor -> invoke_tool -> runner
+    assert runner.chunks == [["www.acme.com"]]
+    assert res.findings == 1 and store.get_run(res.run_id).status == "completed"
 
 
 def test_nuclei_not_allowlisted_raises(scope, registry, tmp_path):

@@ -39,6 +39,7 @@
   .pill { font-size:11px; padding:1px 7px; border-radius:10px; border:1px solid var(--line); }
   .pill.ok { color:var(--ok); border-color:var(--ok); }
   .pill.bad { color:var(--bad); border-color:var(--bad); }
+  .pill.warn { color:var(--warn); border-color:var(--warn); }
   .pill.muted { color:var(--muted); }
   .sc-2 { color:var(--ok); } .sc-3 { color:var(--accent); }
   .sc-4 { color:var(--warn); } .sc-5 { color:var(--bad); }
@@ -85,6 +86,7 @@
 
   <div class="tabs toolbar">
     <button data-seg="assets" class="active">Hosts</button>
+    <button data-seg="leads">Leads</button>
     <button data-seg="redirects">Redirect drops</button>
   </div>
 
@@ -120,6 +122,40 @@
     </div>
   </section>
 
+  <section id="seg-leads" class="seg">
+    <div class="toolbar">
+      <span class="pill bad">leads — need manual PoC</span>
+      <select id="sevFilter">
+        <option value="">any severity</option>
+        <option value="critical">critical</option><option value="high">high</option>
+        <option value="medium">medium</option><option value="low">low</option>
+        <option value="info">info</option>
+      </select>
+      <input type="text" id="leadSearch" placeholder="search host/name…">
+      <button id="leadSearchBtn">Search</button>
+      <span id="leadCount" class="muted"></span>
+    </div>
+    <table id="leads">
+      <thead><tr>
+        <th data-lsort="severity">Severity</th>
+        <th data-lsort="host">Host</th>
+        <th>Template</th><th>Name</th><th>Matched at</th><th>Triage</th><th></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="exportPanel" class="stat" style="display:none; width:100%; margin-top:12px;">
+      <div class="toolbar">
+        <b id="exportName"></b>
+        <button id="copyExport">Copy</button>
+        <button id="downloadExport">Download .md</button>
+        <button id="closeExport">Close</button>
+      </div>
+      <pre id="exportBody" style="max-height:360px; overflow:auto; background:#0d1117;
+           border:1px solid var(--line); border-radius:6px; padding:10px; font-size:12px;
+           white-space:pre-wrap; margin:10px 0 0;"></pre>
+    </div>
+  </section>
+
   <section id="seg-redirects" class="seg">
     <table id="redirects">
       <thead><tr>
@@ -150,7 +186,63 @@ async function loadEngagements() {
   else setErr("no engagements found");
 }
 
-async function refreshAll(){ setErr(""); await Promise.all([loadStats(), loadAssets(), loadRedirects()]); }
+async function refreshAll(){ setErr(""); await Promise.all([loadStats(), loadAssets(), loadLeads(), loadRedirects()]); }
+
+const leadState = { sort:"severity", severity:"", search:"" };
+let exportedFile = null, exportedText = "";
+const TRIAGE = ["new","reviewing","promising","dismissed","false-positive"];
+function sevClass(s){ return ({critical:"bad",high:"bad",medium:"warn",low:"muted",info:"muted"}[s])||"muted"; }
+
+async function loadLeads(){
+  const q = new URLSearchParams({ sort:leadState.sort });
+  if (leadState.severity) q.set("severity", leadState.severity);
+  if (leadState.search) q.set("search", leadState.search);
+  const d = await api(`/api/engagements/${state.eng}/findings?` + q);
+  $("#leadCount").textContent = `${d.total.toLocaleString()} lead(s) — need manual PoC`;
+  $("#leads tbody").innerHTML = d.rows.map(r => {
+    const opts = TRIAGE.map(t => `<option value="${t}"${t===r.triage_status?" selected":""}>${t}</option>`).join("");
+    return `<tr>
+      <td><span class="pill ${sevClass(r.severity)}">${esc(r.severity)}</span></td>
+      <td class="host">${esc(r.host)}</td>
+      <td class="muted">${esc(r.template_id)}</td>
+      <td>${esc(r.name)}</td>
+      <td class="muted">${esc(r.matched_at)}</td>
+      <td><select data-fid="${r.id}" class="triageSel">${opts}</select></td>
+      <td><button data-export="${r.id}">Export</button></td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="7" class="muted">no leads</td></tr>`;
+  $("#leads tbody").querySelectorAll(".triageSel").forEach(sel => sel.addEventListener("change", async e => {
+    try { await fetch(`/api/engagements/${state.eng}/findings/${e.target.dataset.fid}/triage`, {
+      method:"POST", headers:{"content-type":"application/json"},
+      body: JSON.stringify({ status: e.target.value }) }); }
+    catch(x){ setErr(x.message); }
+  }));
+  $("#leads tbody").querySelectorAll("button[data-export]").forEach(b => b.addEventListener("click", () => exportLead(b.dataset.export)));
+}
+
+async function exportLead(fid){
+  try {
+    const d = await api(`/api/engagements/${state.eng}/findings/${fid}/export`);
+    exportedFile = d.filename; exportedText = d.markdown;
+    $("#exportName").textContent = d.filename;
+    $("#exportBody").textContent = d.markdown;
+    $("#exportPanel").style.display = "block";
+    $("#exportPanel").scrollIntoView({behavior:"smooth", block:"nearest"});
+  } catch(x){ setErr(x.message); }
+}
+$("#sevFilter").addEventListener("change", e => { leadState.severity=e.target.value; loadLeads().catch(x=>setErr(x.message)); });
+$("#leadSearchBtn").addEventListener("click", () => { leadState.search=$("#leadSearch").value.trim(); loadLeads().catch(x=>setErr(x.message)); });
+$("#leadSearch").addEventListener("keydown", e => { if (e.key==="Enter") $("#leadSearchBtn").click(); });
+document.querySelectorAll("#leads th[data-lsort]").forEach(th => th.addEventListener("click", () => {
+  leadState.sort = th.dataset.lsort; loadLeads().catch(x=>setErr(x.message));
+}));
+$("#copyExport").addEventListener("click", () => { navigator.clipboard?.writeText(exportedText); });
+$("#downloadExport").addEventListener("click", () => {
+  const blob = new Blob([exportedText], {type:"text/markdown"});
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+  a.download = exportedFile || "lead.md"; a.click(); URL.revokeObjectURL(a.href);
+});
+$("#closeExport").addEventListener("click", () => { $("#exportPanel").style.display="none"; });
 
 async function loadStats() {
   const s = await api(`/api/engagements/${state.eng}/stats`);

@@ -434,9 +434,18 @@ class Store:
                 (attr, kind)).fetchone()
         return row["n"] if row else 0
 
+    # Safe ORDER BY clauses for finding listing (no user SQL interpolated).
+    _SEVERITY_RANK = ("CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 "
+                      "WHEN 'medium' THEN 2 WHEN 'low' THEN 3 WHEN 'info' THEN 4 ELSE 5 END")
+    _FINDING_SORTS = {
+        "recent": "last_seen_at DESC, id DESC",
+        "severity": f"{_SEVERITY_RANK}, target, id",
+        "host": "target ASC, id",
+    }
+
     def list_findings(self, severity: Optional[str] = None, triage_status: Optional[str] = None,
                       search: Optional[str] = None, limit: int = 100, offset: int = 0,
-                      new_in_run: Optional[int] = None) -> list[dict]:
+                      new_in_run: Optional[int] = None, sort: str = "recent") -> list[dict]:
         q = "SELECT * FROM findings WHERE 1=1"
         args: list = []
         if severity:
@@ -446,13 +455,29 @@ class Store:
         if search:
             q += " AND (name LIKE ? OR target LIKE ? OR matched_at LIKE ?)"
             args += [f"%{search}%"] * 3
-        q += " ORDER BY last_seen_at DESC, id DESC LIMIT ? OFFSET ?"
+        order = self._FINDING_SORTS.get(sort, self._FINDING_SORTS["recent"])
+        q += f" ORDER BY {order} LIMIT ? OFFSET ?"
         args += [limit, offset]
         rows = self._rows(q, args)
         if new_in_run is not None:
             for r in rows:
                 r["is_new"] = (r["first_seen_run"] == new_in_run)
         return rows
+
+    def count_findings(self, severity: Optional[str] = None,
+                       triage_status: Optional[str] = None,
+                       search: Optional[str] = None) -> int:
+        q = "SELECT COUNT(*) n FROM findings WHERE 1=1"
+        args: list = []
+        if severity:
+            q += " AND severity=?"; args.append(severity.lower())
+        if triage_status:
+            q += " AND triage_status=?"; args.append(triage_status)
+        if search:
+            q += " AND (name LIKE ? OR target LIKE ? OR matched_at LIKE ?)"
+            args += [f"%{search}%"] * 3
+        with self._lock:
+            return self._conn.execute(q, args).fetchone()["n"]
 
     def get_finding(self, finding_id: int) -> Optional[dict]:
         rows = self._rows("SELECT * FROM findings WHERE id=?", [finding_id])

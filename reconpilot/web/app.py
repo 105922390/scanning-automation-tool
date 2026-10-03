@@ -29,6 +29,10 @@ class RunRequest(BaseModel):
     plan: dict                 # must carry engagement, stage, params (from /api/plan)
     confirm_token: str
 
+
+class TriageRequest(BaseModel):
+    status: str
+
 _STATIC = Path(__file__).parent / "static"
 
 # Hostnames a request's Host header may carry. The server binds 127.0.0.1 only,
@@ -80,6 +84,8 @@ def create_app(base_dir: str | Path = DEFAULT_DIR, allowed_hosts=ALLOWED_HOSTS,
             return fn()
         except service.UnknownEngagement as e:
             raise HTTPException(status_code=404, detail=f"unknown engagement: {e}")
+        except service.UnknownFinding as e:
+            raise HTTPException(status_code=404, detail=f"unknown finding: {e}")
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
@@ -105,6 +111,27 @@ def create_app(base_dir: str | Path = DEFAULT_DIR, allowed_hosts=ALLOWED_HOSTS,
     @app.get("/api/engagements/{name}/redirect-events")
     def redirect_events(name: str, limit: int = Query(200, ge=1, le=2000)):
         return _guard(lambda: service.redirect_events(base_dir, name, limit=limit))
+
+    @app.get("/api/engagements/{name}/findings")
+    def findings(name: str,
+                 severity: Optional[str] = Query(None),
+                 triage: Optional[str] = Query(None),
+                 search: Optional[str] = Query(None),
+                 sort: str = Query("severity"),
+                 limit: int = Query(100, ge=1, le=1000),
+                 offset: int = Query(0, ge=0)):
+        return _guard(lambda: service.findings(
+            base_dir, name, severity=severity, triage=triage, search=search,
+            sort=sort, limit=limit, offset=offset))
+
+    @app.post("/api/engagements/{name}/findings/{fid}/triage")
+    def set_triage(name: str, fid: int, req: TriageRequest):
+        # a write to OUR OWN DB (triage state), never a scan
+        return _guard(lambda: service.set_triage(base_dir, name, fid, req.status))
+
+    @app.get("/api/engagements/{name}/findings/{fid}/export")
+    def export_lead(name: str, fid: int):
+        return _guard(lambda: service.export_lead(base_dir, name, fid))
 
     @app.post("/api/plan")
     def make_plan(req: PlanRequest):
