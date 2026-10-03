@@ -57,8 +57,30 @@
   <label>Engagement
     <select id="eng"></select>
   </label>
+  <button id="addProgBtn">+ Add program</button>
   <span id="err" class="muted"></span>
 </header>
+
+<section id="addProg" class="stat" style="display:none; margin:20px; width:auto;">
+  <div style="margin-bottom:8px;"><b>Add a program</b></div>
+  <p class="muted" style="margin:0 0 8px;">
+    Uploading an engagement asserts <b>you are authorized</b> to test it — the
+    <code>authorized_by</code> / <code>authorized_date</code> fields are yours to fill.
+    ReconPilot does not and cannot verify authorization.
+  </p>
+  <div class="toolbar">
+    <input type="file" id="progFile" accept=".yaml,.yml">
+    <button id="progValidate">Validate</button>
+    <label class="muted"><input type="checkbox" id="progOverwrite"> overwrite if exists</label>
+    <button id="progSave" disabled style="border-color:var(--ok); color:var(--ok);">Save</button>
+    <button id="progCancel">Cancel</button>
+  </div>
+  <textarea id="progYaml" rows="12" style="width:100%; background:#0d1117; color:var(--fg);
+     border:1px solid var(--line); border-radius:6px; padding:10px; font-family:ui-monospace,
+     Menlo,Consolas,monospace; font-size:12px; margin-top:8px;"
+     placeholder="Paste engagement YAML here (engagement.name, program_url, authorized_by, authorized_date, in_scope.domains, allowed_tools)…"></textarea>
+  <div id="progMsg" class="muted" style="margin-top:8px;"></div>
+</section>
 
 <main>
   <section id="planner" style="margin-bottom:20px;">
@@ -396,6 +418,50 @@ $("#confirmBtn").addEventListener("click", async () => {
     if (!r.ok){ $("#runHead").innerHTML = `<span class="pill bad">rejected</span> ${esc(d.detail||r.status)}`; return; }
     pollRun(d.run_id);
   } catch(x){ $("#runHead").innerHTML = `<span class="pill bad">error</span> ${esc(x.message)}`; }
+});
+
+// add program (upload engagement)
+let progToken = null;
+$("#addProgBtn").addEventListener("click", () => {
+  const p = $("#addProg"); p.style.display = p.style.display==="none" ? "block" : "none";
+});
+$("#progCancel").addEventListener("click", () => { $("#addProg").style.display="none"; });
+$("#progFile").addEventListener("change", async e => {
+  const f = e.target.files[0]; if (f) $("#progYaml").value = await f.text();
+  progToken = null; $("#progSave").disabled = true;
+});
+$("#progYaml").addEventListener("input", () => { progToken = null; $("#progSave").disabled = true; });
+$("#progValidate").addEventListener("click", async () => {
+  const msg = $("#progMsg");
+  try {
+    const r = await fetch("/api/engagements/validate", { method:"POST",
+      headers:{"content-type":"application/json"}, body: JSON.stringify({ yaml: $("#progYaml").value }) });
+    const d = await r.json();
+    if (!r.ok) { msg.innerHTML = `<span class="pill bad">error</span> ${esc(d.detail||r.status)}`; return; }
+    if (!d.ok) { msg.innerHTML = `<span class="pill bad">invalid</span> ` + d.errors.map(esc).join("; ");
+                 progToken=null; $("#progSave").disabled=true; return; }
+    progToken = d.confirm_token;
+    $("#progSave").disabled = false;
+    msg.innerHTML = `<span class="pill ok">valid</span> ${esc(d.name)} → <code>${esc(d.slug)}.yaml</code>`
+      + (d.exists ? ` <span class="pill warn">exists — tick overwrite to replace</span>` : "");
+  } catch(x){ msg.innerHTML = `<span class="pill bad">error</span> ${esc(x.message)}`; }
+});
+$("#progSave").addEventListener("click", async () => {
+  if (!progToken) return;
+  const msg = $("#progMsg");
+  try {
+    const r = await fetch("/api/engagements", { method:"POST",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({ yaml: $("#progYaml").value, confirm_token: progToken,
+                             overwrite: $("#progOverwrite").checked }) });
+    const d = await r.json();
+    if (!r.ok) { msg.innerHTML = `<span class="pill bad">error</span> ${esc(d.detail||r.status)}`; return; }
+    await loadEngagements();                      // refresh dropdown
+    state.eng = d.slug; $("#eng").value = d.slug;  // switch to the new one
+    await refreshAll();
+    $("#addProg").style.display = "none";
+    $("#progYaml").value = ""; progToken = null; $("#progSave").disabled = true;
+  } catch(x){ msg.innerHTML = `<span class="pill bad">error</span> ${esc(x.message)}`; }
 });
 
 loadEngagements().catch(x => setErr(x.message));

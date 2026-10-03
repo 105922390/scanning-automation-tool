@@ -10,10 +10,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+import hashlib
+import re
+
+import yaml
+
 from .. import report
 from ..audit_log import AuditLog
+from ..config import build_scope
 from ..engagement import list_engagements, load_engagement
+from ..errors import ConfigError
 from ..store import Store
+
+# Upload guardrails.
+MAX_UPLOAD_BYTES = 256 * 1024
+_SLUG_RE = re.compile(r"[^A-Za-z0-9_-]")
 
 # Triage states a user can set on a lead (free-text column, validated here).
 TRIAGE_STATES = ("new", "reviewing", "promising", "dismissed", "false-positive")
@@ -111,6 +122,79 @@ def assets(base_dir: str | Path, name: str, *, filter: str = "all",
 
 class UnknownFinding(LookupError):
     """Requested finding id does not exist for this engagement."""
+
+
+class UploadError(ValueError):
+    """An uploaded engagement failed validation (safe-parse, schema, name, size)."""
+
+
+class EngagementExists(Exception):
+    """Target engagement file exists and overwrite was not requested."""
+
+
+def _engagements_dir(base_dir: str | Path) -> Path:
+    return Path(base_dir)
+
+
+def validate_engagement_yaml(base_dir: str | Path, yaml_text: str) -> dict:
+    """Validate an uploaded engagement WITHOUT saving. Returns
+    {name, slug, exists}. Raises UploadError (listing the problem) on any failure.
+
+    Safety: parsed with yaml.safe_load ONLY (no arbitrary object construction / code
+    execution); schema-validated via config.build_scope (requires authorized_by,
+    authorized_date and >=1 in_scope entry); name slugified to [A-Za-z0-9_-] and the
+    target path confined to the engagements dir (no traversal)."""
+    if yaml_text is None:
+        raise UploadError("empty upload")
+    if len(yaml_text.encode("utf-8")) > MAX_UPLOAD_BYTES:
+        raise UploadError(f"upload too large (>{MAX_UPLOAD_BYTES} bytes)")
+
+    try:
+        raw = yaml.safe_load(yaml_text)       # safe_load: rejects !!python/... constructs
+    except yaml.YAMLError as e:
+        raise UploadError(f"invalid YAML: {e}")
+    if not isinstance(raw, dict):
+        raise UploadError("engagement YAML must be a mapping at the top level")
+
+    try:
+        scope = build_scope(raw)              # full schema validation (ConfigError)
+    except ConfigError as e:
+        raise UploadError(str(e))
+
+    name = scope.engagement.name
+    slug = _SLUG_RE.sub("", name.strip().replace(" ", "-"))
+    if not slug:
+        raise UploadError(f"engagement name {name!r} has no filename-safe characters "
+                          "(use letters, digits, '-' or '_')")
+
+    base = _engagements_dir(base_dir).resolve()
+    target = (base / f"{slug}.yaml").resolve()
+    if target.parent != base:                 # defense-in-depth: no path escape
+        raise UploadError("resolved engagement path escapes the engagements directory")
+
+    return {"name": name, "slug": slug, "exists": target.exists()}
+
+
+def upload_core(slug: str, yaml_text: str) -> dict:
+    """Confirm-token core binding the write to this exact slug + content."""
+    digest = hashlib.sha256((yaml_text or "").encode("utf-8")).hexdigest()
+    return {"kind": "engagement_upload", "slug": slug, "sha256": digest}
+
+
+def save_engagement_yaml(base_dir: str | Path, yaml_text: str, *,
+                         overwrite: bool = False) -> dict:
+    """Validate (again) and write the uploaded engagement into the engagements dir.
+    Raises UploadError on validation failure, EngagementExists if the file exists
+    and ``overwrite`` is False."""
+    info = validate_engagement_yaml(base_dir, yaml_text)   # re-validate server-side
+    base = _engagements_dir(base_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    target = (base / f"{info['slug']}.yaml")
+    if target.exists() and not overwrite:
+        raise EngagementExists(info["slug"])
+    target.write_text(yaml_text, encoding="utf-8")
+    return {"name": info["name"], "slug": info["slug"],
+            "overwritten": bool(info["exists"]), "engagements": list_engagements(base_dir)}
 
 
 def _finding_row(f: dict) -> dict:

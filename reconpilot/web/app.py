@@ -33,6 +33,16 @@ class RunRequest(BaseModel):
 class TriageRequest(BaseModel):
     status: str
 
+
+class UploadValidateRequest(BaseModel):
+    yaml: str
+
+
+class UploadSaveRequest(BaseModel):
+    yaml: str
+    confirm_token: str
+    overwrite: bool = False
+
 _STATIC = Path(__file__).parent / "static"
 
 # Hostnames a request's Host header may carry. The server binds 127.0.0.1 only,
@@ -171,6 +181,40 @@ def create_app(base_dir: str | Path = DEFAULT_DIR, allowed_hosts=ALLOWED_HOSTS,
         if not job:
             raise HTTPException(status_code=404, detail="unknown run")
         return job_log(base_dir, job, offset=offset)
+
+    @app.post("/api/engagements/validate")
+    def validate_engagement(req: UploadValidateRequest):
+        # dry-run validation; returns a confirm_token the save step requires. The
+        # token (unreadable cross-origin, unforgeable) is the confirm step for this
+        # write endpoint, alongside the Host-header allowlist.
+        def _do():
+            try:
+                info = service.validate_engagement_yaml(base_dir, req.yaml)
+            except service.UploadError as e:
+                return {"ok": False, "errors": [str(e)]}
+            core = service.upload_core(info["slug"], req.yaml)
+            return {"ok": True, **info, "confirm_token": planner.confirm_token(core)}
+        return _guard(_do)
+
+    @app.post("/api/engagements")
+    def create_engagement(req: UploadSaveRequest):
+        # 1. confirm enforcement: token must match THIS slug + exact content.
+        try:
+            info = service.validate_engagement_yaml(base_dir, req.yaml)
+        except service.UploadError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        core = service.upload_core(info["slug"], req.yaml)
+        if not planner.verify_token(core, req.confirm_token):
+            raise HTTPException(status_code=403,
+                                detail="upload not confirmed: validate first, then save")
+        # 2. write (re-validates), with overwrite protection.
+        try:
+            return service.save_engagement_yaml(base_dir, req.yaml, overwrite=req.overwrite)
+        except service.UploadError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except service.EngagementExists as e:
+            raise HTTPException(status_code=409,
+                                detail=f"engagement {e} already exists; set overwrite to replace it")
 
     @app.get("/")
     def index():

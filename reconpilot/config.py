@@ -157,8 +157,20 @@ def load_scope(path: str | Path) -> Scope:
     if not path.exists():
         raise ConfigError(f"scope file not found: {path}")
     raw = yaml.safe_load(path.read_text()) or {}
+    return build_scope(raw)
+
+
+def build_scope(raw: dict) -> Scope:
+    """Validate an already-parsed scope mapping into a :class:`Scope`, raising
+    :class:`ConfigError` for anything missing/invalid. Shared by ``load_scope`` and
+    the web upload endpoint, so an uploaded engagement passes the exact same schema
+    validation (required fields incl. authorized_by/date, >=1 in_scope entry, …)."""
+    if not isinstance(raw, dict):
+        raise ConfigError("scope must be a YAML mapping at the top level")
 
     eng = _require(raw, "engagement", "scope.yaml")
+    if not isinstance(eng, dict):
+        raise ConfigError("engagement: must be a mapping")
     engagement = Engagement(
         name=str(_require(eng, "name", "engagement")),
         program_url=str(_require(eng, "program_url", "engagement")),
