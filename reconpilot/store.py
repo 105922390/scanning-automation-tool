@@ -312,6 +312,25 @@ class Store:
         with self._lock:
             return [r["key"] for r in self._conn.execute(q, args).fetchall()]
 
+    def keys_flagged(self, kind: str, *, true_flag: Optional[str] = None,
+                     null_flag: Optional[str] = None,
+                     limit: Optional[int] = None) -> list[str]:
+        """Keys filtered by attrs flags: ``true_flag`` must be boolean-true, and
+        ``null_flag`` must be absent/null. Lets liveness select resolved hosts that
+        have NOT yet been probed (``probed_at_run`` still null) so a resume
+        continues with the remaining hosts instead of restarting."""
+        q = "SELECT key FROM assets WHERE kind=?"
+        args: list = [kind]
+        if true_flag is not None:
+            q += " AND json_extract(attrs, '$.' || ?) = 1"; args.append(true_flag)
+        if null_flag is not None:
+            q += " AND json_extract(attrs, '$.' || ?) IS NULL"; args.append(null_flag)
+        q += " ORDER BY key"
+        if limit is not None:
+            q += " LIMIT ?"; args.append(limit)
+        with self._lock:
+            return [r["key"] for r in self._conn.execute(q, args).fetchall()]
+
     def new_findings_in_run(self, run_id: int) -> list[dict]:
         return self._rows(
             "SELECT * FROM findings WHERE first_seen_run=? "
@@ -348,22 +367,59 @@ class Store:
         }
 
     # -- browse (for the GUI) ------------------------------------------------ #
-    def list_assets(self, kind: Optional[str] = None, search: Optional[str] = None,
-                    limit: int = 100, offset: int = 0,
-                    new_in_run: Optional[int] = None) -> list[dict]:
-        q = "SELECT * FROM assets WHERE 1=1"
+    # Safe ORDER BY clauses for asset listing (no user SQL ever interpolated).
+    _ASSET_SORTS = {
+        "recent": "last_seen_at DESC, kind, key",
+        "host": "key ASC",
+        "host_desc": "key DESC",
+        "status": "CAST(json_extract(attrs, '$.status_code') AS INTEGER) DESC, key",
+        "status_asc": "CAST(json_extract(attrs, '$.status_code') AS INTEGER) ASC, key",
+    }
+
+    def _asset_filter_sql(self, kind, search, flag_true, flag_present):
+        q = " WHERE 1=1"
         args: list = []
         if kind:
             q += " AND kind=?"; args.append(kind)
         if search:
             q += " AND key LIKE ?"; args.append(f"%{search}%")
-        q += " ORDER BY last_seen_at DESC, kind, key LIMIT ? OFFSET ?"
-        args += [limit, offset]
-        rows = self._rows(q, args)
+        if flag_true:
+            q += " AND json_extract(attrs, '$.' || ?) = 1"; args.append(flag_true)
+        if flag_present:
+            q += " AND json_extract(attrs, '$.' || ?) IS NOT NULL"; args.append(flag_present)
+        return q, args
+
+    def list_assets(self, kind: Optional[str] = None, search: Optional[str] = None,
+                    limit: int = 100, offset: int = 0,
+                    new_in_run: Optional[int] = None, flag_true: Optional[str] = None,
+                    flag_present: Optional[str] = None, sort: str = "recent") -> list[dict]:
+        where, args = self._asset_filter_sql(kind, search, flag_true, flag_present)
+        order = self._ASSET_SORTS.get(sort, self._ASSET_SORTS["recent"])
+        q = f"SELECT * FROM assets{where} ORDER BY {order} LIMIT ? OFFSET ?"
+        rows = self._rows(q, args + [limit, offset])
         if new_in_run is not None:
             for r in rows:
                 r["is_new"] = (r["first_seen_run"] == new_in_run)
         return rows
+
+    def count_assets(self, kind: Optional[str] = None, search: Optional[str] = None,
+                     flag_true: Optional[str] = None,
+                     flag_present: Optional[str] = None) -> int:
+        """Count assets matching the same filters as :meth:`list_assets` (for
+        pagination totals and the dashboard stat tiles)."""
+        where, args = self._asset_filter_sql(kind, search, flag_true, flag_present)
+        with self._lock:
+            return self._conn.execute(f"SELECT COUNT(*) n FROM assets{where}", args).fetchone()["n"]
+
+    def distinct_array_values(self, kind: str, attr: str) -> int:
+        """Count DISTINCT values across a JSON-array attribute of a kind — e.g. the
+        number of distinct IPs across every subdomain's attrs.ips list."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(DISTINCT je.value) n FROM assets, "
+                "json_each(json_extract(attrs, '$.' || ?)) je WHERE kind=?",
+                (attr, kind)).fetchone()
+        return row["n"] if row else 0
 
     def list_findings(self, severity: Optional[str] = None, triage_status: Optional[str] = None,
                       search: Optional[str] = None, limit: int = 100, offset: int = 0,

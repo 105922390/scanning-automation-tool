@@ -33,7 +33,7 @@ from typing import Callable, Iterable, Optional
 from ..audit_log import AuditLog
 from ..config import Scope, ToolSpec
 from ..store import Store
-from ._ingest import choose_output
+from ._ingest import choose_output, chunked
 
 # dnsx text output (-a -resp): "host [A] [1.2.3.4]" with one [TYPE] [value] pair
 # per record; a host may appear on several lines. We also accept dnsx -json.
@@ -148,6 +148,7 @@ class DnsResolveResult:
 class DnsResolveStage:
     STAGE = "dns_resolve"
     TOOL = "dnsx"
+    DEFAULT_CHUNK = 5000      # dnsx is fast; large chunks still finish within the timeout
 
     def __init__(self, scope: Scope, registry: dict[str, ToolSpec], store: Store,
                  audit: AuditLog, runner, output_dir: str | Path):
@@ -195,32 +196,43 @@ class DnsResolveStage:
                                     unresolved=len(hosts), dry_run=True)
 
         run = executor or (lambda hosts_, out_: self.invoke_tool(hosts_, out_))
+        chunk_size = self.scope.limits.chunk_size(self.STAGE, self.DEFAULT_CHUNK)
         run_id = self.store.start_run(self.STAGE, tool=self.TOOL,
                                       note=json.dumps({"artifacts": str(base),
-                                                       "input_hosts": len(hosts)}))
+                                                       "input_hosts": len(hosts),
+                                                       "chunk_size": chunk_size}))
         resolved_hosts: set[str] = set()
         ips: set[str] = set()
+        chunks_done = 0
         try:
-            for inv in run(hosts, base) or []:
-                # ingest on clean exit AND on timeout (partial output is still
-                # valuable); choose_output falls back to the stdout sidecar if a
-                # timed-out tool never flushed its own -o file
-                if inv.exit_code == 0 or getattr(inv, "timed_out", False):
-                    path = choose_output(inv, parse_dnsx)
-                    if path:
-                        for res in parse_dnsx(path):
-                            self.store.upsert_asset("subdomain", res.host, run_id,
-                                                    attrs=res.attrs(run_id))
-                            resolved_hosts.add(res.host)
-                            ips.update(res.ips)
+            # run chunk-by-chunk so each invocation fits the timeout; the rate
+            # limiter still applies across chunks, so aggregate rate is unchanged.
+            # Ingest after EACH chunk, so an interrupt keeps every finished chunk.
+            for ci, chunk in enumerate(chunked(hosts, chunk_size)):
+                for inv in run(chunk, base / f"chunk-{ci:04d}") or []:
+                    # ingest on clean exit AND on timeout (partial output is still
+                    # valuable); choose_output falls back to the stdout sidecar if a
+                    # timed-out tool never flushed its own -o file
+                    if inv.exit_code == 0 or getattr(inv, "timed_out", False):
+                        path = choose_output(inv, parse_dnsx)
+                        if path:
+                            for res in parse_dnsx(path):
+                                self.store.upsert_asset("subdomain", res.host, run_id,
+                                                        attrs=res.attrs(run_id))
+                                resolved_hosts.add(res.host)
+                                ips.update(res.ips)
+                chunks_done += 1
+                self.audit.log_event("chunk_completed", stage=self.STAGE, run=run_id,
+                                     chunk=ci, hosts=len(chunk), resolved=len(resolved_hosts))
         except BaseException as e:  # noqa: BLE001 - Ctrl-C included: finalize first
             reason = type(e).__name__ if isinstance(e, KeyboardInterrupt) \
                 else f"{type(e).__name__}: {e}"
             self.store.finish_run(run_id, status="interrupted", note=json.dumps(
                 {"artifacts": str(base), "reason": reason,
-                 "resolved": len(resolved_hosts)}))
+                 "resolved": len(resolved_hosts), "chunks_done": chunks_done}))
             self.audit.log_event("run_interrupted", stage=self.STAGE, run=run_id,
-                                 reason=reason, resolved=len(resolved_hosts))
+                                 reason=reason, resolved=len(resolved_hosts),
+                                 chunks_done=chunks_done)
             if not isinstance(e, KeyboardInterrupt):
                 raise
             return DnsResolveResult(

@@ -225,8 +225,10 @@ def test_cli_run_liveness_errors_cleanly_when_httpx_absent(capsys, tmp_path, ama
         "    output: hosts\n"
         "    active: true\n"
         "    args: \"-l {targets_file} -o {output}\"\n")
+    # --host forces one in-scope host so a chunk actually runs (an empty resolved
+    # set would yield no chunks and never reach the tool-availability check)
     rc = cli.main(["-e", "amazon-vrp", "--engagements-dir", str(amazon_copy),
-                   "--run-liveness", "--limit-hosts", "1",
+                   "--run-liveness", "--host", "www.amazon.com",
                    "--tools", str(reg), "--out", str(tmp_path / "r")])
     assert rc == 1
     err = capsys.readouterr().err
@@ -249,3 +251,21 @@ def test_cli_run_liveness_host_in_scope_dry_run(capsys, tmp_path, amazon_copy):
                    "--out", str(tmp_path / "r")])
     out = capsys.readouterr().out
     assert rc == 0 and "on 1 host(s)" in out and "--host www.amazon.com" in out
+
+
+def test_chunk_sizes_parsed_and_validated(tmp_path):
+    (tmp_path / "t.yaml").write_text(_MIN_YAML.format(name="t") + (
+        "limits:\n  chunk_sizes:\n    liveness: 500\n    dns_resolve: 5000\n"))
+    lim = load_engagement("t", tmp_path).limits
+    assert lim.chunk_size("liveness", 999) == 500
+    assert lim.chunk_size("dns_resolve", 999) == 5000
+    assert lim.chunk_size("other", 123) == 123          # falls back to default
+
+
+@pytest.mark.parametrize("bad", ["    liveness: 0\n", "    liveness: -1\n",
+                                 "    liveness: big\n"])
+def test_bad_chunk_sizes_fail_loudly(tmp_path, bad):
+    (tmp_path / "t.yaml").write_text(_MIN_YAML.format(name="t")
+                                     + "limits:\n  chunk_sizes:\n" + bad)
+    with pytest.raises(ConfigError):
+        load_engagement("t", tmp_path)

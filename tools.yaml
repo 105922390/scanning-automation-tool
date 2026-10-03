@@ -77,7 +77,9 @@ tools:
     resolver: true
     # -nc: no ANSI color in the -o file (dnsx colorizes by default, which breaks
     #      downstream parsing). parse_dnsx also strips color defensively.
-    args: "-l {targets_file} -silent -nc -a -resp -o {output}"
+    # -t 200 : higher concurrency so dead hosts don't stall resolution.
+    # -retry 1: don't spend many retries on hosts that won't resolve.
+    args: "-l {targets_file} -silent -nc -a -resp -t 200 -retry 1 -o {output}"
     install: "go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest"
 
   tlsx:

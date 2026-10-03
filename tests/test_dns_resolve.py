@@ -233,3 +233,53 @@ def test_parse_dnsx_real_colored_crlf_output(tmp_path):
 
 def test_dnsx_args_disable_color(registry):
     assert "-nc" in registry["dnsx"].args.split()
+
+
+# --------------------------------------------------------------------------- #
+# chunked execution
+# --------------------------------------------------------------------------- #
+def _chunk_scope(dns_scope, size):
+    return dataclasses.replace(dns_scope, limits=dataclasses.replace(
+        dns_scope.limits, chunk_sizes={"dns_resolve": size}))
+
+
+class _ChunkDnsRunner:
+    def __init__(self, fail_after=None):
+        self.chunks = []
+        self.fail_after = fail_after
+
+    def __call__(self, hosts, out_dir):            # executor signature
+        self.chunks.append(list(hosts))
+        if self.fail_after is not None and len(self.chunks) > self.fail_after:
+            raise KeyboardInterrupt
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        p = Path(out_dir) / "dnsx.out"
+        p.write_text("".join(f"{h} [A] [10.0.0.{i}]\n" for i, h in enumerate(hosts)))
+        return [SimpleNamespace(output_path=str(p), exit_code=0, timed_out=False)]
+
+
+def test_dns_runs_multiple_chunks_and_ingests_all(dns_scope, registry, tmp_path):
+    scope = _chunk_scope(dns_scope, 2)
+    stage, store, audit = _stage(scope, registry, tmp_path)
+    rid = store.start_run("passive_recon")
+    hosts = [f"h{i}.amazon.com" for i in range(5)]
+    for h in hosts:
+        store.upsert_asset("subdomain", h, rid)
+    runner = _ChunkDnsRunner()
+    res = stage.run(executor=runner)
+    assert [len(c) for c in runner.chunks] == [2, 2, 1]
+    assert res.resolved == 5
+    assert sum(r["event"] == "chunk_completed" for r in audit.read_all()) == 3
+
+
+def test_dns_interrupt_after_first_chunk_keeps_chunk_one(dns_scope, registry, tmp_path):
+    scope = _chunk_scope(dns_scope, 2)
+    stage, store, _ = _stage(scope, registry, tmp_path)
+    rid = store.start_run("passive_recon")
+    hosts = [f"h{i}.amazon.com" for i in range(5)]
+    for h in hosts:
+        store.upsert_asset("subdomain", h, rid)
+    res = stage.run(executor=_ChunkDnsRunner(fail_after=1))
+    assert res.interrupted and res.resolved == 2
+    assert store.get_run(res.run_id).status == "interrupted"
+    assert len(store.keys_where_flag("subdomain", "resolves", True)) == 2

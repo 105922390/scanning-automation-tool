@@ -178,6 +178,9 @@ def test_run_with_fake_executor(live_scope, registry, tmp_path):
 
 def test_run_interrupt_preserves_stored_liveness(live_scope, registry, tmp_path):
     stage, store, audit = _stage(live_scope, registry, tmp_path)
+    # a resolved host so there is a chunk to run
+    store.upsert_asset("subdomain", "www.acme.com", store.start_run("dns_resolve"),
+                       attrs={"resolves": True})
 
     def boom(hosts, out_dir):
         rid = store.last_run("liveness").id
@@ -274,3 +277,88 @@ def test_run_with_explicit_host_bypasses_db_selection(live_scope, registry, tmp_
     assert runner.calls == [("httpx", ["www.acme.com"])]   # went through invoke_tool->runner
     assert res.live == 1
     assert store.keys_where_flag("subdomain", "live", True) == ["www.acme.com"]
+
+
+# --------------------------------------------------------------------------- #
+# chunked execution: multiple invocations, ingest-after-each, resume
+# --------------------------------------------------------------------------- #
+def _chunk_scope(live_scope, size):
+    return dataclasses.replace(live_scope, limits=dataclasses.replace(
+        live_scope.limits, chunk_sizes={"liveness": size}))
+
+
+class _ChunkRunner:
+    """Fake runner: one call per chunk; emits a 200 for each host in the chunk.
+    Can raise after a given number of chunks to simulate an interrupt."""
+    def __init__(self, fail_after=None):
+        self.chunks = []
+        self.fail_after = fail_after
+
+    def run(self, tool, hosts, out_dir, **kw):
+        self.chunks.append(list(hosts))
+        if self.fail_after is not None and len(self.chunks) > self.fail_after:
+            raise KeyboardInterrupt
+        recs = [{"input": h, "url": f"https://{h}/", "status_code": 200} for h in hosts]
+        p = _jsonl(Path(out_dir) / "httpx.json", recs)
+        return SimpleNamespace(invocations=[
+            SimpleNamespace(output_path=str(p), exit_code=0, timed_out=False)])
+
+
+def _seed_resolved(store, hosts):
+    rid = store.start_run("dns_resolve")
+    for h in hosts:
+        store.upsert_asset("subdomain", h, rid, attrs={"resolves": True})
+
+
+def test_large_host_set_runs_multiple_chunks_and_ingests_all(live_scope, registry, tmp_path):
+    scope = _chunk_scope(live_scope, 2)            # 2 hosts/chunk
+    store = Store(":memory:")
+    audit = AuditLog(tmp_path / "a.jsonl", engagement="t")
+    hosts = [f"h{i}.acme.com" for i in range(5)]   # 5 hosts -> 3 chunks (2,2,1)
+    _seed_resolved(store, hosts)
+    runner = _ChunkRunner()
+    stage = LivenessStage(scope, registry, store, audit, runner, tmp_path / "out")
+    res = stage.run()
+    assert [len(c) for c in runner.chunks] == [2, 2, 1]        # chunked correctly
+    assert res.live == 5                                       # all ingested
+    assert sorted(store.keys_where_flag("subdomain", "live", True)) == sorted(hosts)
+    # a chunk_completed audit event per chunk
+    assert sum(r["event"] == "chunk_completed" for r in audit.read_all()) == 3
+
+
+def test_interrupt_after_first_chunk_keeps_chunk_one(live_scope, registry, tmp_path):
+    scope = _chunk_scope(live_scope, 2)
+    store = Store(":memory:")
+    audit = AuditLog(tmp_path / "a.jsonl", engagement="t")
+    hosts = [f"h{i}.acme.com" for i in range(5)]
+    _seed_resolved(store, hosts)
+    runner = _ChunkRunner(fail_after=1)            # dies entering chunk 2
+    stage = LivenessStage(scope, registry, store, audit, runner, tmp_path / "out")
+    res = stage.run()
+    assert res.interrupted and res.live == 2       # only chunk 1 stored
+    assert store.get_run(res.run_id).status == "interrupted"
+    live = store.keys_where_flag("subdomain", "live", True)
+    assert len(live) == 2 and set(live) <= set(hosts)
+
+
+def test_resume_skips_already_probed_hosts(live_scope, registry, tmp_path):
+    scope = _chunk_scope(live_scope, 2)
+    store = Store(":memory:")
+    audit = AuditLog(tmp_path / "a.jsonl", engagement="t")
+    hosts = [f"h{i}.acme.com" for i in range(4)]
+    _seed_resolved(store, hosts)
+    # first pass dies after chunk 1 (2 hosts probed)
+    s1 = LivenessStage(scope, registry, store, audit, _ChunkRunner(fail_after=1),
+                       tmp_path / "o1")
+    s1.run()
+    probed_first = set(store.keys_where_flag("subdomain", "live", True))
+    assert len(probed_first) == 2
+    # resume: hosts_to_probe must exclude the already-probed two
+    remaining = store.keys_flagged("subdomain", true_flag="resolves",
+                                   null_flag="probed_at_run")
+    assert set(remaining) == set(hosts) - probed_first
+    runner2 = _ChunkRunner()
+    s2 = LivenessStage(scope, registry, store, audit, runner2, tmp_path / "o2")
+    res2 = s2.run()
+    assert set(sum(runner2.chunks, [])) == set(hosts) - probed_first   # only the rest
+    assert len(store.keys_where_flag("subdomain", "live", True)) == 4   # all now probed

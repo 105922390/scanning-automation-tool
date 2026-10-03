@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional, Sequence
+
+
+def chunked(seq: Sequence, size: int) -> Iterator[list]:
+    """Yield ``seq`` in lists of at most ``size`` (``size`` must be > 0). Stages
+    split their host list this way so each tool invocation finishes inside the
+    per-tool timeout, and ingest after every chunk so progress is saved as it goes."""
+    if size <= 0:
+        raise ValueError("chunk size must be > 0")
+    for i in range(0, len(seq), size):
+        yield list(seq[i:i + size])
 
 
 def choose_output(inv, parse_fn: Callable[[str], list]) -> Optional[str]:

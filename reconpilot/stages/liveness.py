@@ -43,7 +43,7 @@ from ..config import Scope, ToolSpec
 from ..http_policy import filter_on_redirect, redirect_target_host
 from ..scope_guard import ScopeGuard, normalize_target
 from ..store import Store
-from ._ingest import choose_output
+from ._ingest import choose_output, chunked
 
 # httpx JSON keys vary by version; probe a few for each field.
 _TECH_KEYS = ("tech", "technologies")
@@ -130,6 +130,7 @@ class LivenessResult:
 class LivenessStage:
     STAGE = "liveness"
     TOOL = "httpx"
+    DEFAULT_CHUNK = 500      # ~500 hosts at the safe-mode 2 rps ~= 250s, within the 300s timeout
 
     def __init__(self, scope: Scope, registry: dict[str, ToolSpec], store: Store,
                  audit: AuditLog, runner, output_dir: str | Path):
@@ -145,9 +146,13 @@ class LivenessStage:
         if self.TOOL not in scope.allowed_tools:
             raise ValueError(f"liveness: '{self.TOOL}' is not in allowed_tools")
 
-    # -- stage input: ONLY hosts that resolved in dns_resolve ---------------- #
+    # -- stage input: resolved hosts NOT yet probed in any cycle -------------- #
     def hosts_to_probe(self, limit: Optional[int] = None) -> list[str]:
-        return self.store.keys_where_flag("subdomain", "resolves", True, limit=limit)
+        """Resolved subdomains that have not yet been probed. A probed host (live,
+        or dropped on redirect) carries ``probed_at_run``, so skipping those lets a
+        re-run/resume continue with the remaining hosts instead of restarting."""
+        return self.store.keys_flagged("subdomain", true_flag="resolves",
+                                       null_flag="probed_at_run", limit=limit)
 
     # -- ingest (parse + redirect-target policy + store), incremental -------- #
     def _drop(self, rec: dict, run_id: int, rule: str,
@@ -227,27 +232,37 @@ class LivenessStage:
                                   dropped_redirect=0, dry_run=True)
 
         run = executor or (lambda hosts_, out_: self.invoke_tool(hosts_, out_))
+        chunk_size = self.scope.limits.chunk_size(self.STAGE, self.DEFAULT_CHUNK)
         run_id = self.store.start_run(self.STAGE, tool=self.TOOL, note=json.dumps(
-            {"artifacts": str(base), "resolved_input": len(hosts)}))
-        probed = live = dropped = 0
+            {"artifacts": str(base), "resolved_input": len(hosts), "chunk_size": chunk_size}))
+        probed = live = dropped = chunks_done = 0
         drop_examples: list[tuple[str, str, str]] = []
         try:
-            for inv in run(hosts, base) or []:
-                # ingest on clean exit AND on timeout; choose_output falls back to
-                # the stdout sidecar if a timed-out httpx never flushed its -o file
-                if inv.exit_code == 0 or getattr(inv, "timed_out", False):
-                    path = choose_output(inv, parse_httpx_jsonl)
-                    if path:
-                        probed += len(parse_httpx_jsonl(path))
-                        l, d, ex = self.ingest_httpx_file(path, run_id)
-                        live += l; dropped += d; drop_examples += ex
+            # chunk so each httpx invocation finishes within the per-tool timeout;
+            # the rate limiter still spans chunks (aggregate rate unchanged). Ingest
+            # after EACH chunk so an interrupt/kill keeps every finished chunk.
+            for ci, chunk in enumerate(chunked(hosts, chunk_size)):
+                for inv in run(chunk, base / f"chunk-{ci:04d}") or []:
+                    # ingest on clean exit AND on timeout; choose_output falls back to
+                    # the stdout sidecar if a timed-out httpx never flushed its -o file
+                    if inv.exit_code == 0 or getattr(inv, "timed_out", False):
+                        path = choose_output(inv, parse_httpx_jsonl)
+                        if path:
+                            probed += len(parse_httpx_jsonl(path))
+                            l, d, ex = self.ingest_httpx_file(path, run_id)
+                            live += l; dropped += d; drop_examples += ex
+                chunks_done += 1
+                self.audit.log_event("chunk_completed", stage=self.STAGE, run=run_id,
+                                     chunk=ci, hosts=len(chunk), live=live, dropped=dropped)
         except BaseException as e:  # noqa: BLE001 - Ctrl-C included: finalize first
             reason = type(e).__name__ if isinstance(e, KeyboardInterrupt) \
                 else f"{type(e).__name__}: {e}"
             self.store.finish_run(run_id, status="interrupted", note=json.dumps(
-                {"artifacts": str(base), "reason": reason, "live": live, "dropped": dropped}))
+                {"artifacts": str(base), "reason": reason, "live": live,
+                 "dropped": dropped, "chunks_done": chunks_done}))
             self.audit.log_event("run_interrupted", stage=self.STAGE, run=run_id,
-                                 reason=reason, live=live, dropped=dropped)
+                                 reason=reason, live=live, dropped=dropped,
+                                 chunks_done=chunks_done)
             if not isinstance(e, KeyboardInterrupt):
                 raise
             return LivenessResult(

@@ -31,9 +31,15 @@ class Limits:
     # process tree and moves on. tool_timeouts overrides it per tool (e.g. amass).
     max_tool_seconds: int = DEFAULT_MAX_TOOL_SECONDS
     tool_timeouts: dict[str, int] = field(default_factory=dict)
+    # Per-stage host-chunk size: a stage splits its host list into chunks so each
+    # tool invocation finishes inside the per-tool timeout. Empty -> stage default.
+    chunk_sizes: dict[str, int] = field(default_factory=dict)
 
     def tool_timeout(self, tool: str) -> int:
         return self.tool_timeouts.get(tool, self.max_tool_seconds)
+
+    def chunk_size(self, stage: str, default: int) -> int:
+        return self.chunk_sizes.get(stage, default)
 
     def effective(self, force_safe_mode: bool = False) -> "Limits":
         """Return the limits actually enforced at runtime.
@@ -138,6 +144,14 @@ def _tool_timeouts(v: Any) -> dict[str, int]:
     return {str(k): _positive_int(n, f"limits.tool_timeouts.{k}") for k, n in v.items()}
 
 
+def _chunk_sizes(v: Any) -> dict[str, int]:
+    if v is None:
+        return {}
+    if not isinstance(v, dict):
+        raise ConfigError(f"limits.chunk_sizes: expected a mapping stage -> count, got {v!r}")
+    return {str(k): _positive_int(n, f"limits.chunk_sizes.{k}") for k, n in v.items()}
+
+
 def load_scope(path: str | Path) -> Scope:
     path = Path(path)
     if not path.exists():
@@ -174,6 +188,7 @@ def load_scope(path: str | Path) -> Scope:
         max_tool_seconds=_positive_int(
             lim.get("max_tool_seconds", DEFAULT_MAX_TOOL_SECONDS), "limits.max_tool_seconds"),
         tool_timeouts=_tool_timeouts(lim.get("tool_timeouts")),
+        chunk_sizes=_chunk_sizes(lim.get("chunk_sizes")),
     )
 
     allowed = frozenset(_as_list(raw.get("allowed_tools")))

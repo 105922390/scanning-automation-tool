@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReconPilot</title>
+<style>
+  :root {
+    --bg:#0f1419; --panel:#171e26; --line:#273039; --fg:#e6edf3; --muted:#8b98a5;
+    --accent:#4493f8; --ok:#2ea043; --warn:#d29922; --bad:#f85149;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif; }
+  header { display:flex; align-items:center; gap:16px; padding:12px 20px;
+           border-bottom:1px solid var(--line); background:var(--panel); flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; letter-spacing:.5px; }
+  header .badge { font-size:11px; color:var(--muted); border:1px solid var(--line);
+                  padding:2px 8px; border-radius:10px; }
+  select, input[type=text], button {
+    background:#0d1117; color:var(--fg); border:1px solid var(--line);
+    border-radius:6px; padding:6px 10px; font-size:13px; }
+  main { padding:20px; max-width:1200px; margin:0 auto; }
+  .stats { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
+  .stat { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+          padding:12px 16px; min-width:120px; }
+  .stat .n { font-size:24px; font-weight:600; }
+  .stat .l { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+  .toolbar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  .tabs button { cursor:pointer; }
+  .tabs button.active { border-color:var(--accent); color:var(--accent); }
+  table { width:100%; border-collapse:collapse; background:var(--panel);
+          border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
+           font-size:13px; vertical-align:top; }
+  th { color:var(--muted); font-weight:600; cursor:pointer; user-select:none; white-space:nowrap; }
+  td.host { font-family:ui-monospace,Menlo,Consolas,monospace; }
+  tr:last-child td { border-bottom:none; }
+  .pill { font-size:11px; padding:1px 7px; border-radius:10px; border:1px solid var(--line); }
+  .pill.ok { color:var(--ok); border-color:var(--ok); }
+  .pill.bad { color:var(--bad); border-color:var(--bad); }
+  .pill.muted { color:var(--muted); }
+  .sc-2 { color:var(--ok); } .sc-3 { color:var(--accent); }
+  .sc-4 { color:var(--warn); } .sc-5 { color:var(--bad); }
+  .muted { color:var(--muted); }
+  .pager { display:flex; gap:10px; align-items:center; margin-top:12px; }
+  .seg { display:none; }
+  .seg.active { display:block; }
+  code { font-family:ui-monospace,Menlo,Consolas,monospace; }
+</style>
+</head>
+<body>
+<header>
+  <h1>RECONPILOT</h1>
+  <span class="badge">read-only · localhost</span>
+  <label>Engagement
+    <select id="eng"></select>
+  </label>
+  <span id="err" class="muted"></span>
+</header>
+
+<main>
+  <div class="stats" id="stats"></div>
+
+  <div class="tabs toolbar">
+    <button data-seg="assets" class="active">Hosts</button>
+    <button data-seg="redirects">Redirect drops</button>
+  </div>
+
+  <section id="seg-assets" class="seg active">
+    <div class="toolbar">
+      <span>Filter:</span>
+      <select id="filter">
+        <option value="all">All</option>
+        <option value="resolved">Resolved</option>
+        <option value="live">Live</option>
+        <option value="dropped">Dropped (redirect)</option>
+      </select>
+      <input type="text" id="search" placeholder="search host…">
+      <button id="searchBtn">Search</button>
+      <span id="assetCount" class="muted"></span>
+    </div>
+    <table id="assets">
+      <thead><tr>
+        <th data-sort="host">Host</th>
+        <th>Resolved</th>
+        <th>Live</th>
+        <th data-sort="status">Status</th>
+        <th>Title</th>
+        <th>Tech</th>
+        <th>Redirect → / drop</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="pager">
+      <button id="prev">‹ Prev</button>
+      <span id="pageInfo" class="muted"></span>
+      <button id="next">Next ›</button>
+    </div>
+  </section>
+
+  <section id="seg-redirects" class="seg">
+    <table id="redirects">
+      <thead><tr>
+        <th>Time</th><th>Input host</th><th>Redirect target</th><th>Rule</th><th>Status</th><th>Run</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <p id="redirectCount" class="muted"></p>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const state = { eng:null, filter:"all", search:"", sort:"host", limit:50, offset:0 };
+
+async function api(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error((await r.json().catch(()=>({}))).detail || r.status);
+  return r.json();
+}
+function setErr(m){ $("#err").textContent = m ? ("⚠ " + m) : ""; }
+
+async function loadEngagements() {
+  const d = await api("/api/engagements");
+  const sel = $("#eng"); sel.innerHTML = "";
+  d.engagements.forEach(n => { const o=document.createElement("option"); o.value=o.textContent=n; sel.appendChild(o); });
+  if (d.engagements.length) { state.eng = d.engagements[0]; sel.value = state.eng; await refreshAll(); }
+  else setErr("no engagements found");
+}
+
+async function refreshAll(){ setErr(""); await Promise.all([loadStats(), loadAssets(), loadRedirects()]); }
+
+async function loadStats() {
+  const s = await api(`/api/engagements/${state.eng}/stats`);
+  const tiles = [
+    ["subdomains","Subdomains"], ["resolved","Resolved"], ["live","Live"],
+    ["dropped_on_redirect","Dropped (redirect)"], ["distinct_ips","Distinct IPs"],
+  ];
+  $("#stats").innerHTML = tiles.map(([k,l]) =>
+    `<div class="stat"><div class="n">${(s[k]??0).toLocaleString()}</div><div class="l">${l}</div></div>`).join("");
+}
+
+function scClass(c){ return c ? "sc-" + String(c)[0] : ""; }
+function liveCell(r){
+  if (r.dropped_by_redirect) return `<span class="pill bad">dropped</span>`;
+  if (r.live === true) return `<span class="pill ok">live</span>`;
+  if (r.live === false) return `<span class="pill muted">no</span>`;
+  return `<span class="muted">—</span>`;
+}
+function esc(s){ return String(s??"").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+async function loadAssets() {
+  const q = new URLSearchParams({ filter:state.filter, sort:state.sort,
+    limit:state.limit, offset:state.offset });
+  if (state.search) q.set("search", state.search);
+  const d = await api(`/api/engagements/${state.eng}/assets?` + q);
+  $("#assets tbody").innerHTML = d.rows.map(r => `<tr>
+    <td class="host">${esc(r.host)}</td>
+    <td>${r.resolves ? '<span class="pill ok">yes</span>' : '<span class="pill muted">no</span>'}</td>
+    <td>${liveCell(r)}</td>
+    <td class="${scClass(r.status_code)}">${r.status_code ?? "—"}</td>
+    <td>${esc(r.title)}</td>
+    <td class="muted">${esc((r.tech||[]).join(", "))}</td>
+    <td class="muted">${esc(r.redirect_target || r.dropped_by_redirect)}</td>
+  </tr>`).join("") || `<tr><td colspan="7" class="muted">no rows</td></tr>`;
+  const from = d.total ? d.offset+1 : 0, to = Math.min(d.offset+d.limit, d.total);
+  $("#assetCount").textContent = `${d.total.toLocaleString()} match`;
+  $("#pageInfo").textContent = `${from}–${to} of ${d.total.toLocaleString()}`;
+  $("#prev").disabled = d.offset <= 0;
+  $("#next").disabled = to >= d.total;
+}
+
+async function loadRedirects() {
+  const d = await api(`/api/engagements/${state.eng}/redirect-events?limit=500`);
+  $("#redirects tbody").innerHTML = d.rows.map(r => `<tr>
+    <td class="muted">${esc((r.ts||"").replace("T"," ").slice(0,19))}</td>
+    <td class="host">${esc(r.input_host)}</td>
+    <td class="host">${esc(r.final_host)}</td>
+    <td><code>${esc(r.matched_rule)}</code></td>
+    <td>${r.status_code ?? "—"}</td>
+    <td class="muted">${r.run ?? "—"}</td>
+  </tr>`).join("") || `<tr><td colspan="6" class="muted">no redirect drops</td></tr>`;
+  $("#redirectCount").textContent = `${d.total.toLocaleString()} redirect-drop event(s)`;
+}
+
+// events
+$("#eng").addEventListener("change", e => { state.eng = e.target.value; state.offset=0; refreshAll().catch(x=>setErr(x.message)); });
+$("#filter").addEventListener("change", e => { state.filter = e.target.value; state.offset=0; loadAssets().catch(x=>setErr(x.message)); });
+$("#searchBtn").addEventListener("click", () => { state.search = $("#search").value.trim(); state.offset=0; loadAssets().catch(x=>setErr(x.message)); });
+$("#search").addEventListener("keydown", e => { if (e.key==="Enter") $("#searchBtn").click(); });
+$("#prev").addEventListener("click", () => { state.offset=Math.max(0,state.offset-state.limit); loadAssets().catch(x=>setErr(x.message)); });
+$("#next").addEventListener("click", () => { state.offset+=state.limit; loadAssets().catch(x=>setErr(x.message)); });
+document.querySelectorAll("#assets th[data-sort]").forEach(th => th.addEventListener("click", () => {
+  const col = th.dataset.sort;
+  state.sort = col==="host" ? (state.sort==="host"?"host_desc":"host")
+            : (state.sort==="status"?"status_asc":"status");
+  state.offset=0; loadAssets().catch(x=>setErr(x.message));
+}));
+document.querySelectorAll(".tabs button").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll(".tabs button").forEach(x=>x.classList.remove("active"));
+  b.classList.add("active");
+  document.querySelectorAll(".seg").forEach(s=>s.classList.remove("active"));
+  $("#seg-"+b.dataset.seg).classList.add("active");
+}));
+
+loadEngagements().catch(x => setErr(x.message));
+</script>
+</body>
+</html>
