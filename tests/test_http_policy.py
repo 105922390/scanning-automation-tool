@@ -25,7 +25,8 @@ def test_amazon_vrp_http_block_parsed():
     assert http.user_agent == "amazonvrpresearcher_floopy"
     assert http.require_user_agent is True
     assert http.no_third_party_oob is True
-    assert http.drop_on_redirect_to == ("*.aws.amazon.com", "midway-auth.amazon.com")
+    assert http.drop_on_redirect_to == ("*.aws.amazon.com", "midway-auth.amazon.com",
+                                        "federate.amazon.com")
     assert http.user_agent_is_valid()
 
 

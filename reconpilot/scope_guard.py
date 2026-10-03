@@ -162,8 +162,13 @@ class ScopeGuard:
                 return self._emit(ScopeDecision(
                     target, host, False, "matched out_of_scope host label (contains)",
                     f"label_contains:{needle}"))
+        # host_label_equals matches a whole label OR any "-"-split token of a label,
+        # so internal-cdn-v2-beta -> [internal,cdn,v2,beta] catches "beta", while
+        # latest (one token) never matches "beta". (split("-") yields [label] when
+        # there's no hyphen, so whole-label matching is preserved.)
+        label_tokens = {t for lbl in labels for t in lbl.split("-")}
         for needle in self.scope.out_of_scope_host_label_equals:
-            if any(lbl == needle for lbl in labels):
+            if needle in label_tokens:
                 return self._emit(ScopeDecision(
                     target, host, False, "matched out_of_scope host label (equals)",
                     f"label_equals:{needle}"))

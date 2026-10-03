@@ -13,7 +13,17 @@
 # This bundles only the Python app and its web static assets. The window is the
 # existing web UI via pywebview (see reconpilot/desktop.py:main).
 
+from PyInstaller.utils.hooks import collect_data_files
+
 block_cipher = None
+
+# bundle the web UI's static files so app.py can serve index.html from the exe
+datas = [('reconpilot/web/static', 'reconpilot/web/static')]
+# publicsuffixlist ships public_suffix_list.dat and loads it from disk at runtime
+# (reconpilot.seeds -> registrable-domain / enumeration seeds); bundle that data.
+datas += collect_data_files('publicsuffixlist')
+# (tldextract is NOT used; nuclei/httpx/dnsx/etc. are EXTERNAL Go binaries, not
+# Python packages, so they contribute no bundled data files.)
 
 a = Analysis(
     # entry is the root-level wrapper (NOT reconpilot/desktop.py directly) so the
@@ -21,8 +31,7 @@ a = Analysis(
     ['run_desktop.py'],
     pathex=[],
     binaries=[],
-    # bundle the web UI's static files so app.py can serve index.html from the exe
-    datas=[('reconpilot/web/static', 'reconpilot/web/static')],
+    datas=datas,
     hiddenimports=[
         'uvicorn.logging', 'uvicorn.loops.auto', 'uvicorn.protocols.http.auto',
         'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan.on',

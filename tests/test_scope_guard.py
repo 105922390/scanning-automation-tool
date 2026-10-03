@@ -104,6 +104,24 @@ def test_label_equals_rejects_whole_label_only(label_scope):
     assert g.is_allowed("latest.amazon.com")
 
 
+def test_label_equals_matches_hyphen_split_tokens(label_scope):
+    g = ScopeGuard(label_scope)
+    # a non-prod token anywhere in a hyphenated label -> out of scope
+    d = g.check("internal-cdn-v2-beta.amazon.com")
+    assert not d.allowed and d.matched_rule == "label_equals:beta"
+    d2 = g.check("idp-integ.amazon.com")
+    assert not d2.allowed and d2.matched_rule == "label_equals:integ"
+
+
+def test_label_equals_token_split_does_not_over_reject(label_scope):
+    g = ScopeGuard(label_scope)
+    # "latest" is a single token (not "test") -> still in scope
+    assert g.is_allowed("latest.amazon.com")
+    # hyphenated label whose tokens are all production -> in scope
+    assert g.is_allowed("internal-cdn-v2.amazon.com")
+    assert g.is_allowed("beta-reader.amazon.com") is False   # token "beta" matches
+
+
 def test_label_rules_do_not_over_reject(label_scope):
     g = ScopeGuard(label_scope)
     assert g.is_allowed("latest.amazon.com")

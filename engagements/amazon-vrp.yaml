@@ -38,6 +38,7 @@ http:
   drop_on_redirect_to:            # post-request: discard results that land on these hosts
     - "*.aws.amazon.com"
     - "midway-auth.amazon.com"
+    - "federate.amazon.com"       # internal SSO/IdP — an auth boundary like midway-auth
 
 # -----------------------------------------------------------------------------
 # IN SCOPE  — retail marketplaces are wildcard-scoped (*.amazon.<tld>).
