@@ -198,11 +198,15 @@ class GuardedRunner:
                  *, rate_limiter: Optional[RateLimiter] = None,
                  guard: Optional[ScopeGuard] = None,
                  force_safe_mode: bool = False,
-                 which: Callable[[str], Optional[str]] = __import__("shutil").which):
+                 which: Callable[[str], Optional[str]] = __import__("shutil").which,
+                 canceller=None):
         self.scope = scope
         self.registry = registry
         self.audit = audit
         self.which = which
+        # Optional cooperative cancel: a Stop request kills the live child process
+        # tree (via the canceller) and makes subsequent execs abort the run.
+        self.canceller = canceller
         self.rl = rate_limiter or RateLimiter(scope.limits, force_safe_mode=force_safe_mode)
         # Guard audits through the same engagement log, satisfying its
         # "audit sink must be thread-safe" contract (AuditLog holds a lock).
@@ -445,6 +449,10 @@ class GuardedRunner:
         output was captured is kept, and the caller moves on to the next
         target/tool. Never raises for tool failures (only on Ctrl-C, after
         killing the tree)."""
+        # If a Stop arrived before this invocation started, abort the run now
+        # (don't launch another tool process).
+        if self.canceller is not None and self.canceller.cancelled():
+            raise KeyboardInterrupt("run cancelled")
         run_id = self.audit.log_tool_start(spec.name, target, cmd, stage=spec.stage,
                                            extra={"timeout_s": timeout_s})
         started = time.monotonic()
@@ -452,9 +460,16 @@ class GuardedRunner:
         stdout = stderr = ""
         try:
             proc = _spawn(cmd)
+            # Register the live process so a Stop (on another thread) can kill its
+            # whole tree; if cancel already fired, this kills it immediately.
+            if self.canceller is not None:
+                self.canceller.register(proc)
             try:
                 stdout, stderr = proc.communicate(timeout=timeout_s)
                 inv.exit_code = proc.returncode
+                # A Stop killed the child while we were waiting -> abort the run.
+                if self.canceller is not None and self.canceller.cancelled():
+                    raise KeyboardInterrupt("run cancelled")
             except subprocess.TimeoutExpired:
                 _kill_tree(proc)
                 try:

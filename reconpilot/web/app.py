@@ -76,7 +76,8 @@ def create_app(base_dir: str | Path = DEFAULT_DIR, allowed_hosts=ALLOWED_HOSTS,
                executor=None) -> FastAPI:
     app = FastAPI(title="ReconPilot", docs_url=None, redoc_url=None)
     # executor drives the real stages (a seam) in prod; tests inject a fake one.
-    jobs = JobManager(executor or (lambda plan: execute_plan(plan, base_dir)))
+    jobs = JobManager(executor or (lambda plan, canceller: execute_plan(plan, base_dir, canceller)))
+    app.state.jobs = jobs        # exposed so the desktop launcher can cancel on shutdown
 
     @app.middleware("http")
     async def _guard_host_and_cache(request, call_next):
@@ -181,6 +182,14 @@ def create_app(base_dir: str | Path = DEFAULT_DIR, allowed_hosts=ALLOWED_HOSTS,
         if not job:
             raise HTTPException(status_code=404, detail="unknown run")
         return job_log(base_dir, job, offset=offset)
+
+    @app.post("/api/runs/{run_id}/stop")
+    def stop_run(run_id: str):
+        # cancel the background job AND kill its child tool process tree
+        job = jobs.stop(run_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="unknown run")
+        return job.to_status()
 
     @app.post("/api/engagements/validate")
     def validate_engagement(req: UploadValidateRequest):

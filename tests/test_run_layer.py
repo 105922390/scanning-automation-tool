@@ -54,7 +54,7 @@ def test_confirm_token_roundtrip_and_tamper():
 # --------------------------------------------------------------------------- #
 def test_job_completes_with_fake_executor():
     seen = {}
-    def fake(plan):
+    def fake(plan, canceller=None):
         seen.update(plan)
         return {"summary": "ok", "run_id": 7}
     jm = JobManager(fake)
@@ -66,14 +66,14 @@ def test_job_completes_with_fake_executor():
 
 
 def test_job_failed_on_executor_error():
-    def boom(plan):
+    def boom(plan, canceller=None):
         raise RuntimeError("nope")
     job = JobManager(boom).submit("demo", "dns_resolve", {})
     assert job.wait(2) and job.status == "failed" and "RuntimeError: nope" in job.error
 
 
 def test_job_interrupted():
-    def ki(plan):
+    def ki(plan, canceller=None):
         raise KeyboardInterrupt
     job = JobManager(ki).submit("demo", "liveness", {})
     assert job.wait(2) and job.status == "interrupted"
@@ -92,7 +92,7 @@ def test_default_executor_runs_through_run_stage(engdir, monkeypatch):
             store=SimpleNamespace(close=lambda: None), audit=None, stage=None, out=None)
 
     monkeypatch.setattr(orch, "run_stage", fake_run_stage)
-    job = JobManager(lambda plan: execute_plan(plan, engdir)).submit("demo", "liveness", {})
+    job = JobManager(lambda plan, c=None: execute_plan(plan, engdir, c)).submit("demo", "liveness", {})
     assert job.wait(2) and job.status == "completed"
     assert job.result == {"summary": "ok", "run_id": 1}
     assert calls and calls[0][1] == "liveness"
@@ -185,7 +185,7 @@ async def _asgi(app, method, path, body_obj=None, host="127.0.0.1:8000"):
 
 def _app_with_fake(engdir):
     runs = []
-    def fake(plan):
+    def fake(plan, canceller=None):
         runs.append(plan)
         return {"summary": f"ran {plan['stage']}"}
     return create_app(base_dir=engdir, executor=fake), runs
@@ -294,3 +294,69 @@ def test_web_run_rejects_out_of_scope_host_before_execution(tmp_path, monkeypatc
     res = asyncio.run(_asgi(app, "POST", "/api/run", body))
     assert res["status"] == 400
     assert "out of scope" in res["json"]["detail"] and "google.com" in res["json"]["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# Stop: cancel a running job + kill the child tool process tree
+# --------------------------------------------------------------------------- #
+def test_stop_cancels_running_job():
+    import threading
+    started = threading.Event()
+
+    def long_job(plan, canceller):
+        started.set()
+        # emulate the runner: wait until cancel is requested, then stop
+        if canceller.wait(5):
+            raise KeyboardInterrupt("run cancelled")
+        return {"summary": "finished (should not happen)"}
+
+    jm = JobManager(long_job)
+    job = jm.submit("demo", "liveness", {})
+    assert started.wait(2)
+    assert jm.stop(job.id) is job
+    assert job.wait(3) and job.status == "cancelled"
+
+
+def test_stop_unknown_job_returns_none():
+    assert JobManager(lambda p, c=None: None).stop("nope") is None
+
+
+def test_canceller_kills_real_child_process_tree(tmp_path):
+    # the canceller must actually kill a live child tree (the manual pain point)
+    import os, subprocess, time
+    from reconpilot.web.jobs import Canceller
+    from reconpilot.runner import _spawn
+
+    py = __import__("sys").executable
+    proc = _spawn([py, "-c", "import time; time.sleep(60)"])
+    c = Canceller()
+    c.register(proc)
+    c.cancel()                                   # kill tree
+    # the process must be dead shortly after
+    for _ in range(50):
+        if proc.poll() is not None:
+            break
+        time.sleep(0.1)
+    assert proc.poll() is not None               # child no longer running
+
+
+def test_stop_endpoint_cancels_and_404(engdir):
+    import threading
+    from reconpilot.web.app import create_app
+    gate = threading.Event()
+
+    def long_job(plan, canceller):
+        gate.set()
+        if canceller.wait(5):
+            raise KeyboardInterrupt("run cancelled")
+        return {"summary": "x"}
+
+    app = create_app(base_dir=engdir, executor=long_job)
+    started = asyncio.run(_asgi(app, "POST", "/api/run", _valid_plan_body(engdir)))
+    rid = started["json"]["run_id"]
+    assert gate.wait(2)
+    stopped = asyncio.run(_asgi(app, "POST", f"/api/runs/{rid}/stop"))
+    assert stopped["status"] == 200 and stopped["json"]["stopping"] is True
+    # unknown run -> 404
+    nf = asyncio.run(_asgi(app, "POST", "/api/runs/deadbeef/stop"))
+    assert nf["status"] == 404

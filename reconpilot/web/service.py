@@ -67,7 +67,7 @@ def _audit_for(store: Store) -> AuditLog:
 def stats(base_dir: str | Path, name: str) -> dict:
     store = _open(base_dir, name)
     try:
-        return {
+        counts = {
             "engagement": name,
             "subdomains": store.count_assets("subdomain"),
             "resolved": store.count_assets("subdomain", flag_true="resolves"),
@@ -75,9 +75,23 @@ def stats(base_dir: str | Path, name: str) -> dict:
             "dropped_on_redirect": store.count_assets("subdomain",
                                                       flag_present="dropped_by_redirect"),
             "distinct_ips": store.distinct_array_values("subdomain", "ips"),
+            "leads": store.count_findings(),
         }
     finally:
         store.close()
+    # scope summary so the UI always shows what the active engagement points at
+    scope = load_engagement(name, base_dir)
+    eff = scope.limits.effective(force_safe_mode=scope.limits.safe_mode)
+    counts["scope"] = {
+        "program_url": scope.engagement.program_url,
+        "in_scope_domains": len(scope.in_scope_domains),
+        "in_scope_cidrs": len(scope.in_scope_cidrs),
+        "rate_cap_rps": eff.max_rps_per_host,
+        "concurrency": eff.max_global_concurrency,
+        "safe_mode": eff.safe_mode,
+        "allowed_tools": len(scope.allowed_tools),
+    }
+    return counts
 
 
 def _asset_row(r: dict) -> dict:

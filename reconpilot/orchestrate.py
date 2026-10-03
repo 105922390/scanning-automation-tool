@@ -30,7 +30,8 @@ class StageRun:
 
 def run_stage(scope, stage_cls, stage_name: str, *, base_dir, tools: str = "tools.yaml",
               out=None, force_safe_mode: bool = False, dry_run: bool = False,
-              limit: Optional[int] = None, hosts: Optional[list] = None) -> StageRun:
+              limit: Optional[int] = None, hosts: Optional[list] = None,
+              canceller=None) -> StageRun:
     """Build and run one stage. Mirrors cli._run_active_stage's construction exactly:
     load_tools(tools) -> AuditLog(eng_base/'audit.jsonl') -> Store.open_for_engagement
     -> GuardedRunner(scope, registry, audit, force_safe_mode=...) -> stage_cls(scope,
@@ -49,7 +50,8 @@ def run_stage(scope, stage_cls, stage_name: str, *, base_dir, tools: str = "tool
     out = Path(out) if out else eng_base / "runs" / stage_name
     audit = AuditLog(eng_base / "audit.jsonl", engagement=scope.engagement.name)
     store = Store.open_for_engagement(scope.engagement.name, base_dir=base_dir)
-    runner = GuardedRunner(scope, registry, audit, force_safe_mode=force_safe_mode)
+    runner = GuardedRunner(scope, registry, audit, force_safe_mode=force_safe_mode,
+                           canceller=canceller)
     try:
         stage = stage_cls(scope, registry, store, audit, runner, out)
         run_kwargs = {"dry_run": dry_run}

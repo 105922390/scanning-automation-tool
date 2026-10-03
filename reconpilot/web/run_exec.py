@@ -23,7 +23,7 @@ _STAGE_CLASSES = {
 }
 
 
-def execute_plan(plan: dict, base_dir: str | Path) -> dict:
+def execute_plan(plan: dict, base_dir: str | Path, canceller=None) -> dict:
     stage_name = plan["stage"]
     stage_cls = _STAGE_CLASSES[stage_name]
     params = plan.get("params") or {}
@@ -31,7 +31,7 @@ def execute_plan(plan: dict, base_dir: str | Path) -> dict:
     hosts = [params["host"]] if params.get("host") else None
 
     sr = orchestrate.run_stage(scope, stage_cls, stage_name, base_dir=base_dir,
-                               limit=params.get("limit"), hosts=hosts)
+                               limit=params.get("limit"), hosts=hosts, canceller=canceller)
     try:
         return {"summary": sr.result.summary_text(),
                 "run_id": getattr(sr.result, "run_id", None)}

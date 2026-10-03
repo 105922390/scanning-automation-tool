@@ -9,6 +9,13 @@
     --bg:#0f1419; --panel:#171e26; --line:#273039; --fg:#e6edf3; --muted:#8b98a5;
     --accent:#4493f8; --ok:#2ea043; --warn:#d29922; --bad:#f85149;
   }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg:#f6f8fa; --panel:#ffffff; --line:#d0d7de; --fg:#1f2328; --muted:#636c76;
+      --accent:#0969da; --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e;
+    }
+    pre, textarea, input, select, button { background:#ffffff !important; }
+  }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--fg);
          font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif; }
@@ -59,6 +66,7 @@
   </label>
   <button id="addProgBtn">+ Add program</button>
   <span id="err" class="muted"></span>
+  <div id="scopeSummary" class="muted" style="flex-basis:100%; font-size:12px;"></div>
 </header>
 
 <section id="addProg" class="stat" style="display:none; margin:20px; width:auto;">
@@ -97,7 +105,10 @@
       </div>
     </div>
     <div id="runPanel" class="stat" style="display:none; width:100%; margin-top:12px;">
-      <div id="runHead"></div>
+      <div class="toolbar">
+        <div id="runHead" style="flex:1;"></div>
+        <button id="stopRun" style="border-color:var(--bad); color:var(--bad);">Stop</button>
+      </div>
       <pre id="runLog" style="max-height:280px; overflow:auto; background:#0d1117;
            border:1px solid var(--line); border-radius:6px; padding:10px; font-size:12px;
            white-space:pre-wrap; margin:10px 0 0;"></pre>
@@ -165,6 +176,11 @@
       </tr></thead>
       <tbody></tbody>
     </table>
+    <div class="pager">
+      <button id="leadPrev">‹ Prev</button>
+      <span id="leadPage" class="muted"></span>
+      <button id="leadNext">Next ›</button>
+    </div>
     <div id="exportPanel" class="stat" style="display:none; width:100%; margin-top:12px;">
       <div class="toolbar">
         <b id="exportName"></b>
@@ -210,17 +226,20 @@ async function loadEngagements() {
 
 async function refreshAll(){ setErr(""); await Promise.all([loadStats(), loadAssets(), loadLeads(), loadRedirects()]); }
 
-const leadState = { sort:"severity", severity:"", search:"" };
+const leadState = { sort:"severity", severity:"", search:"", limit:50, offset:0 };
 let exportedFile = null, exportedText = "";
 const TRIAGE = ["new","reviewing","promising","dismissed","false-positive"];
 function sevClass(s){ return ({critical:"bad",high:"bad",medium:"warn",low:"muted",info:"muted"}[s])||"muted"; }
 
 async function loadLeads(){
-  const q = new URLSearchParams({ sort:leadState.sort });
+  const q = new URLSearchParams({ sort:leadState.sort, limit:leadState.limit, offset:leadState.offset });
   if (leadState.severity) q.set("severity", leadState.severity);
   if (leadState.search) q.set("search", leadState.search);
   const d = await api(`/api/engagements/${state.eng}/findings?` + q);
   $("#leadCount").textContent = `${d.total.toLocaleString()} lead(s) — need manual PoC`;
+  const lfrom = d.total ? d.offset+1 : 0, lto = Math.min(d.offset+d.limit, d.total);
+  $("#leadPage").textContent = `${lfrom}–${lto} of ${d.total.toLocaleString()}`;
+  $("#leadPrev").disabled = d.offset <= 0; $("#leadNext").disabled = lto >= d.total;
   $("#leads tbody").innerHTML = d.rows.map(r => {
     const opts = TRIAGE.map(t => `<option value="${t}"${t===r.triage_status?" selected":""}>${t}</option>`).join("");
     return `<tr>
@@ -252,11 +271,13 @@ async function exportLead(fid){
     $("#exportPanel").scrollIntoView({behavior:"smooth", block:"nearest"});
   } catch(x){ setErr(x.message); }
 }
-$("#sevFilter").addEventListener("change", e => { leadState.severity=e.target.value; loadLeads().catch(x=>setErr(x.message)); });
-$("#leadSearchBtn").addEventListener("click", () => { leadState.search=$("#leadSearch").value.trim(); loadLeads().catch(x=>setErr(x.message)); });
+$("#sevFilter").addEventListener("change", e => { leadState.severity=e.target.value; leadState.offset=0; loadLeads().catch(x=>setErr(x.message)); });
+$("#leadSearchBtn").addEventListener("click", () => { leadState.search=$("#leadSearch").value.trim(); leadState.offset=0; loadLeads().catch(x=>setErr(x.message)); });
 $("#leadSearch").addEventListener("keydown", e => { if (e.key==="Enter") $("#leadSearchBtn").click(); });
+$("#leadPrev").addEventListener("click", () => { leadState.offset=Math.max(0,leadState.offset-leadState.limit); loadLeads().catch(x=>setErr(x.message)); });
+$("#leadNext").addEventListener("click", () => { leadState.offset+=leadState.limit; loadLeads().catch(x=>setErr(x.message)); });
 document.querySelectorAll("#leads th[data-lsort]").forEach(th => th.addEventListener("click", () => {
-  leadState.sort = th.dataset.lsort; loadLeads().catch(x=>setErr(x.message));
+  leadState.sort = th.dataset.lsort; leadState.offset=0; loadLeads().catch(x=>setErr(x.message));
 }));
 $("#copyExport").addEventListener("click", () => { navigator.clipboard?.writeText(exportedText); });
 $("#downloadExport").addEventListener("click", () => {
@@ -274,6 +295,13 @@ async function loadStats() {
   ];
   $("#stats").innerHTML = tiles.map(([k,l]) =>
     `<div class="stat"><div class="n">${(s[k]??0).toLocaleString()}</div><div class="l">${l}</div></div>`).join("");
+  const sc = s.scope || {};
+  const sm = sc.safe_mode ? `<span class="pill warn">safe mode ON</span>` : `<span class="pill ok">safe mode off</span>`;
+  $("#scopeSummary").innerHTML =
+    `pointed at <b>${esc(state.eng)}</b> — ${sc.in_scope_domains||0} in-scope domain(s), `
+    + `${sc.in_scope_cidrs||0} CIDR(s) · rate cap <b>${sc.rate_cap_rps}</b> rps/host, `
+    + `concurrency ${sc.concurrency} ${sm} · ${sc.allowed_tools} tool(s)`
+    + (sc.program_url ? ` · <a href="${esc(sc.program_url)}" target="_blank" rel="noopener" style="color:var(--accent)">program</a>` : "");
 }
 
 function scClass(c){ return c ? "sc-" + String(c)[0] : ""; }
@@ -379,18 +407,26 @@ async function makePlan() {
 $("#planBtn").addEventListener("click", () => makePlan().catch(x=>setErr(x.message)));
 $("#prompt").addEventListener("keydown", e => { if (e.key==="Enter") $("#planBtn").click(); });
 $("#cancelBtn").addEventListener("click", () => { $("#planPanel").style.display="none"; currentPlan=null; });
-let logTimer = null;
+let logTimer = null, currentRunId = null;
 function statusPill(s){
-  const cls = s==="completed"?"ok":(s==="running"?"muted":"bad");
+  const cls = s==="completed"?"ok":(s==="running"?"muted":(s==="cancelled"?"warn":"bad"));
   return `<span class="pill ${cls}">${esc(s)}</span>`;
 }
+$("#stopRun").addEventListener("click", async () => {
+  if (!currentRunId) return;
+  $("#stopRun").disabled = true;
+  try { await fetch(`/api/runs/${currentRunId}/stop`, {method:"POST"}); }
+  catch(x){ setErr(x.message); }
+});
 async function pollRun(runId){
+  currentRunId = runId; $("#stopRun").disabled = false;
   let offset = 0;
   const head = $("#runHead"), log = $("#runLog");
   async function tick(){
     try {
       const st = await api(`/api/runs/${runId}/status`);
-      head.innerHTML = `Run <code>${esc(runId.slice(0,8))}</code> · ${statusPill(st.status)}`
+      head.innerHTML = `Run <code>${esc(runId.slice(0,8))}</code> · ${esc(st.stage||"")} · ${statusPill(st.status)}`
+        + (st.stopping && st.status==="running" ? ` <span class="pill warn">stopping…</span>` : "")
         + (st.error ? ` <span class="muted">${esc(st.error)}</span>` : "");
       const lg = await api(`/api/runs/${runId}/log?offset=${offset}`);
       if (lg.events.length){
@@ -399,7 +435,7 @@ async function pollRun(runId){
         ).join("\n") + "\n";
         offset = lg.next_offset; log.scrollTop = log.scrollHeight;
       }
-      if (st.done){ clearInterval(logTimer); logTimer=null; }
+      if (st.done){ clearInterval(logTimer); logTimer=null; $("#stopRun").disabled=true; }
     } catch(x){ clearInterval(logTimer); logTimer=null; setErr(x.message); }
   }
   clearInterval(logTimer); await tick(); logTimer = setInterval(tick, 1500);

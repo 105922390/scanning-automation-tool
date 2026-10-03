@@ -262,3 +262,11 @@ def test_plan_endpoint_rejects_foreign_host(engdir):
                                  {"prompt": "probe live hosts", "engagement": "demo"},
                                  host="attacker.com"))
     assert res["status"] == 403
+
+
+def test_stats_includes_scope_summary(engdir):
+    s = service.stats(engdir, "demo")
+    sc = s["scope"]
+    assert sc["in_scope_domains"] >= 1
+    assert "rate_cap_rps" in sc and isinstance(sc["safe_mode"], bool)
+    assert sc["allowed_tools"] >= 1 and "leads" in s
